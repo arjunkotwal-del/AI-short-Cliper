@@ -1,0 +1,8 @@
+# Optional dependencies for --mode local.
+# Install on top of requirements.txt:  pip install -r requirements-local.txt
+yt-dlp>=2024.1.1
+faster-whisper>=1.0.0
+openai>=1.0.0
+opencv-python>=4.8.0
+# torch is only needed if you want CUDA Whisper. CPU works without it.
+# torch>=2.0

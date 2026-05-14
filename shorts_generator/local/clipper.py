@@ -1,0 +1,577 @@
+"""Local clipping: ffmpeg subclip + face-aware vertical crop/split-screen + ASS captions.
+
+Pipeline per highlight:
+  1. Cut [start, end] with ffmpeg.
+  2. Sample frames, detect faces, cluster into speaker groups (≤4).
+  3a. If all speakers fit in one 9:16 window → single crop centered on them.
+  3b. If speakers are spread out → filter_complex vstack split-screen (up to 4 panels).
+  4. Generate ASS subtitle file with word-level karaoke highlighting.
+  5. Burn subtitles into the reframed video with ffmpeg.
+"""
+import os
+import shutil
+import subprocess
+import tempfile
+from typing import Dict, List, Optional, Tuple
+
+from ..config import LOCAL_OUTPUT_DIR
+
+
+# ---------------------------------------------------------------------------
+# Aspect ratio helpers
+# ---------------------------------------------------------------------------
+
+def _ratio(aspect_ratio: str) -> float:
+    try:
+        w, h = aspect_ratio.split(":")
+        return float(w) / float(h)
+    except (ValueError, ZeroDivisionError):
+        return 9.0 / 16.0
+
+
+# ---------------------------------------------------------------------------
+# ffmpeg cut
+# ---------------------------------------------------------------------------
+
+def _cut_subclip(source_path: str, start: float, end: float, out_path: str) -> str:
+    cmd = [
+        "ffmpeg", "-y", "-loglevel", "error",
+        "-i", source_path,
+        "-ss", f"{start:.3f}",
+        "-to", f"{end:.3f}",
+        "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+        "-c:a", "aac", "-b:a", "128k",
+        out_path,
+    ]
+    subprocess.run(cmd, check=True)
+    return out_path
+
+
+# ---------------------------------------------------------------------------
+# Face detection helpers
+# ---------------------------------------------------------------------------
+
+_CASCADE_CACHE: Optional[object] = None  # cv2.CascadeClassifier or None sentinel
+
+
+def _get_face_cascade():
+    """Return a cv2 Haar cascade for frontal faces, or None if unavailable.
+
+    OpenCV's C++ loader can't handle Unicode paths (the project lives under
+    'Документы'). We copy the XML to a temp dir with an ASCII-only path.
+    """
+    global _CASCADE_CACHE
+    if _CASCADE_CACHE is not None:
+        return _CASCADE_CACHE
+
+    try:
+        import cv2
+
+        # Find the cascade bundled with the cv2 package
+        cv2_dir = os.path.dirname(cv2.__file__)
+        candidates = [
+            os.path.join(cv2_dir, "data", "haarcascade_frontalface_default.xml"),
+            os.path.join(cv2_dir, "haarcascade_frontalface_default.xml"),
+        ]
+        src_xml = next((p for p in candidates if os.path.exists(p)), None)
+
+        if src_xml is None:
+            _CASCADE_CACHE = False
+            return None
+
+        # Copy to an ASCII temp path
+        tmp_dir = tempfile.gettempdir()
+        dst_xml = os.path.join(tmp_dir, "haarcascade_frontalface_default.xml")
+        if not os.path.exists(dst_xml):
+            shutil.copy2(src_xml, dst_xml)
+
+        cascade = cv2.CascadeClassifier(dst_xml)
+        if cascade.empty():
+            _CASCADE_CACHE = False
+            return None
+
+        _CASCADE_CACHE = cascade
+        return cascade
+    except Exception:
+        _CASCADE_CACHE = False
+        return None
+
+
+def _probe_video(path: str) -> Tuple[int, int, float]:
+    """Return (width, height, fps) via ffprobe."""
+    probe = subprocess.run(
+        [
+            "ffprobe", "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=width,height,r_frame_rate",
+            "-of", "csv=p=0",
+            path,
+        ],
+        capture_output=True, text=True, check=True,
+    )
+    parts = probe.stdout.strip().split(",")
+    w, h = int(parts[0]), int(parts[1])
+    fps_str = parts[2] if len(parts) > 2 else "30/1"
+    try:
+        num, den = fps_str.split("/")
+        fps = float(num) / float(den)
+    except Exception:
+        fps = 30.0
+    return w, h, fps
+
+
+def _sample_frames(video_path: str, n_samples: int = 30) -> List[object]:
+    """Extract n_samples evenly-spaced frames as numpy arrays via ffmpeg pipe."""
+    try:
+        import numpy as np
+
+        w, h, fps = _probe_video(video_path)
+
+        # Get duration
+        dur_probe = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "csv=p=0",
+                video_path,
+            ],
+            capture_output=True, text=True, check=True,
+        )
+        duration = float(dur_probe.stdout.strip())
+
+        frames = []
+        for i in range(n_samples):
+            t = duration * i / max(1, n_samples - 1)
+            cmd = [
+                "ffmpeg", "-y", "-loglevel", "error",
+                "-ss", f"{t:.3f}",
+                "-i", video_path,
+                "-frames:v", "1",
+                "-f", "rawvideo",
+                "-pix_fmt", "bgr24",
+                "pipe:1",
+            ]
+            result = subprocess.run(cmd, capture_output=True)
+            if result.returncode == 0 and len(result.stdout) == w * h * 3:
+                frame = np.frombuffer(result.stdout, dtype=np.uint8).reshape(h, w, 3)
+                frames.append(frame)
+        return frames
+    except Exception:
+        return []
+
+
+def _detect_faces_in_frames(frames: List[object]) -> List[Tuple[int, int, int]]:
+    """Return list of (cx, cy, area) face detections across all frames."""
+    cascade = _get_face_cascade()
+    if cascade is None or not frames:
+        return []
+
+    try:
+        import cv2
+        detections = []
+        for frame in frames:
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            faces = cascade.detectMultiScale(
+                gray,
+                scaleFactor=1.1,
+                minNeighbors=5,
+                minSize=(30, 30),
+            )
+            if len(faces) > 0:
+                for (x, y, fw, fh) in faces:
+                    cx = x + fw // 2
+                    cy = y + fh // 2
+                    detections.append((cx, cy, fw * fh))
+        return detections
+    except Exception:
+        return []
+
+
+def _cluster_speakers(
+    detections: List[Tuple[int, int, int]],
+    src_w: int,
+    max_speakers: int = 4,
+) -> List[Tuple[int, int]]:
+    """Greedy proximity clustering → list of (cx, cy) speaker centers, sorted left-to-right.
+
+    Two detections merge into the same cluster if their horizontal centers are
+    within 20% of the source width.
+    """
+    if not detections:
+        return []
+
+    proximity = src_w * 0.20
+    clusters: List[List[Tuple[int, int, int]]] = []
+
+    for det in detections:
+        cx = det[0]
+        assigned = False
+        for cluster in clusters:
+            cluster_cx = sum(d[0] for d in cluster) / len(cluster)
+            if abs(cx - cluster_cx) < proximity:
+                cluster.append(det)
+                assigned = True
+                break
+        if not assigned:
+            clusters.append([det])
+
+    # Sort clusters by total area (prominence) descending, take top max_speakers
+    clusters.sort(key=lambda c: sum(d[2] for d in c), reverse=True)
+    clusters = clusters[:max_speakers]
+
+    # Compute weighted centroid per cluster (weight = area)
+    centers = []
+    for cluster in clusters:
+        total_area = sum(d[2] for d in cluster)
+        cx = int(sum(d[0] * d[2] for d in cluster) / total_area)
+        cy = int(sum(d[1] * d[2] for d in cluster) / total_area)
+        centers.append((cx, cy))
+
+    # Sort left-to-right for consistent panel ordering
+    centers.sort(key=lambda c: c[0])
+    return centers
+
+
+# ---------------------------------------------------------------------------
+# Framing: single crop vs split-screen
+# ---------------------------------------------------------------------------
+
+# Output dimensions for 9:16 Shorts
+OUT_W = 720
+OUT_H = 1280
+
+
+def _reframe_vertical(in_path: str, out_path: str, aspect_ratio: str) -> str:
+    """Smart vertical reframe: single crop or multi-panel split-screen."""
+    ar = _ratio(aspect_ratio)
+
+    try:
+        w, h, _ = _probe_video(in_path)
+    except Exception:
+        # Fallback: dumb center crop
+        return _center_crop_ffmpeg(in_path, out_path, ar)
+
+    # --- Face detection ---
+    frames = _sample_frames(in_path, n_samples=30)
+    detections = _detect_faces_in_frames(frames)
+    speakers = _cluster_speakers(detections, w, max_speakers=4)
+
+    if len(speakers) <= 1:
+        # No faces found or single speaker: center crop
+        if speakers:
+            cx = speakers[0][0]
+            print(f"[clip/framing] 1 speaker detected at x={cx} -> single crop", flush=True)
+        else:
+            cx = w // 2
+            print("[clip/framing] no faces detected -> center crop", flush=True)
+        return _single_crop_ffmpeg(in_path, out_path, w, h, cx, ar)
+
+    # --- Decide: single crop or split-screen ---
+    # Crop window width for 9:16 from the source height
+    crop_w = int(h * ar)
+    crop_w = min(crop_w, w)
+
+    leftmost = speakers[0][0]
+    rightmost = speakers[-1][0]
+    spread = rightmost - leftmost
+
+    if spread <= crop_w * 0.70:
+        # All speakers fit comfortably in one crop: center on their midpoint
+        center_x = (leftmost + rightmost) // 2
+        print(f"[clip/framing] {len(speakers)} speakers, spread={spread}px fits in crop={crop_w}px -> single crop at x={center_x}", flush=True)
+        return _single_crop_ffmpeg(in_path, out_path, w, h, center_x, ar)
+    else:
+        # Need split-screen
+        print(f"[clip/framing] {len(speakers)} speakers, spread={spread}px > {crop_w*0.70:.0f}px threshold -> {len(speakers)}-panel split-screen", flush=True)
+        return _split_screen_ffmpeg(in_path, out_path, w, h, speakers, ar)
+
+
+def _center_crop_ffmpeg(in_path: str, out_path: str, ar: float) -> str:
+    """Pure center-crop fallback — no face detection."""
+    crop_filter = (
+        "crop=trunc(min(iw\\,ih*{r})/2)*2:ih:(iw-trunc(min(iw\\,ih*{r})/2)*2)/2:0"
+    ).format(r=ar)
+    cmd = [
+        "ffmpeg", "-y", "-loglevel", "error",
+        "-i", in_path,
+        "-vf", f"{crop_filter},scale={OUT_W}:{OUT_H}",
+        "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+        "-c:a", "copy",
+        out_path,
+    ]
+    subprocess.run(cmd, check=True)
+    return out_path
+
+
+def _single_crop_ffmpeg(
+    in_path: str, out_path: str, src_w: int, src_h: int, center_x: int, ar: float
+) -> str:
+    """Crop to ar ratio centered on center_x, scale to OUT_W x OUT_H."""
+    crop_w = int(src_h * ar)
+    crop_w = min(crop_w, src_w)
+    # Clamp x so crop doesn't go out of bounds
+    x = max(0, min(center_x - crop_w // 2, src_w - crop_w))
+    crop_filter = f"crop={crop_w}:{src_h}:{x}:0,scale={OUT_W}:{OUT_H}"
+    cmd = [
+        "ffmpeg", "-y", "-loglevel", "error",
+        "-i", in_path,
+        "-vf", crop_filter,
+        "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+        "-c:a", "copy",
+        out_path,
+    ]
+    subprocess.run(cmd, check=True)
+    return out_path
+
+
+def _split_screen_ffmpeg(
+    in_path: str,
+    out_path: str,
+    src_w: int,
+    src_h: int,
+    speakers: List[Tuple[int, int]],
+    ar: float,
+) -> str:
+    """Build a vertical split-screen with one panel per speaker."""
+    n = len(speakers)
+    panel_h = OUT_H // n  # each panel height in output pixels
+    panel_w = OUT_W       # full output width for each panel
+
+    # Each panel: crop a 9:16 window around the speaker, scale to panel_w x panel_h
+    # The crop from source: width = src_h * (panel_w / panel_h), height = src_h
+    panel_ar = panel_w / panel_h  # same as overall ar for uniform panels
+    crop_w = int(src_h * panel_ar)
+    crop_w = min(crop_w, src_w)
+
+    filter_parts = []
+    panel_labels = []
+
+    for i, (cx, cy) in enumerate(speakers):
+        x = max(0, min(cx - crop_w // 2, src_w - crop_w))
+        label = f"p{i}"
+        filter_parts.append(
+            f"[0:v]crop={crop_w}:{src_h}:{x}:0,scale={panel_w}:{panel_h}[{label}]"
+        )
+        panel_labels.append(f"[{label}]")
+
+    # Stack panels vertically
+    stack_inputs = "".join(panel_labels)
+    filter_parts.append(f"{stack_inputs}vstack=inputs={n}[v]")
+
+    filter_complex = ";".join(filter_parts)
+
+    cmd = [
+        "ffmpeg", "-y", "-loglevel", "error",
+        "-i", in_path,
+        "-filter_complex", filter_complex,
+        "-map", "[v]",
+        "-map", "0:a",
+        "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+        "-c:a", "copy",
+        out_path,
+    ]
+    subprocess.run(cmd, check=True)
+    return out_path
+
+
+# ---------------------------------------------------------------------------
+# ASS caption generation — TikTok-style word-by-word karaoke highlighting
+# ---------------------------------------------------------------------------
+
+_WORDS_PER_CHUNK = 3  # words shown at once
+
+
+def _fmt_ass_time(seconds: float) -> str:
+    """Format seconds -> H:MM:SS.CC (ASS timestamp format)."""
+    seconds = max(0.0, seconds)
+    h = int(seconds // 3600)
+    m = int((seconds % 3600) // 60)
+    s = int(seconds % 60)
+    cs = int(round((seconds % 1) * 100))
+    if cs >= 100:
+        cs = 99
+    return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
+
+
+def _generate_ass(
+    words: List[Dict],
+    clip_start: float,
+    clip_end: float,
+    width: int,
+    height: int,
+) -> Optional[str]:
+    """Build an ASS subtitle file with karaoke-style word highlighting.
+
+    Primary colour (yellow) = active/just-spoken word.
+    Secondary colour (white) = upcoming words in the same chunk.
+    Each chunk pops in with a quick scale animation.
+    """
+    clip_words = []
+    for w in words:
+        ws = float(w["start"])
+        we = float(w["end"])
+        word_text = w.get("word", "").strip()
+        if not word_text:
+            continue
+        if ws >= clip_start - 0.1 and ws < clip_end + 0.1:
+            clip_words.append({
+                "word": word_text.upper(),
+                "start": max(0.0, ws - clip_start),
+                "end": min(clip_end - clip_start, we - clip_start),
+            })
+
+    if not clip_words:
+        return None
+
+    font_size = max(60, int(height * 0.055))
+    margin_v = max(60, int(height * 0.06))
+
+    header = f"""[Script Info]
+ScriptType: v4.00+
+PlayResX: {width}
+PlayResY: {height}
+ScaledBorderAndShadow: yes
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Pop,Impact,{font_size},&H0000FFFF,&H00FFFFFF,&H00000000,&HCC000000,-1,0,0,0,100,100,1,0,1,4,1,2,30,30,{margin_v},1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
+
+    events = []
+    chunks = [clip_words[i:i + _WORDS_PER_CHUNK] for i in range(0, len(clip_words), _WORDS_PER_CHUNK)]
+
+    for chunk in chunks:
+        chunk_start = chunk[0]["start"]
+        chunk_end = chunk[-1]["end"]
+        if chunk_end <= chunk_start:
+            chunk_end = chunk_start + 1.0
+
+        parts = [r"{\fscx90\fscy90\t(0,150,\fscx100\fscy100)}"]
+        for w in chunk:
+            dur_s = max(0.05, w["end"] - w["start"])
+            dur_cs = int(round(dur_s * 100))
+            parts.append(f"{{\\k{dur_cs}}}{w['word']} ")
+
+        text = "".join(parts).rstrip()
+        line = (
+            f"Dialogue: 0,"
+            f"{_fmt_ass_time(chunk_start)},"
+            f"{_fmt_ass_time(chunk_end)},"
+            f"Pop,,0,0,0,,{text}"
+        )
+        events.append(line)
+
+    return header + "\n".join(events) + "\n"
+
+
+def _burn_captions(in_path: str, out_path: str, ass_filename: str, out_dir: str) -> str:
+    """Burn an ASS subtitle file into a video using ffmpeg.
+
+    Runs ffmpeg with cwd=out_dir so the ass= filter uses a relative path,
+    avoiding Windows drive-letter colon escaping issues.
+    """
+    cmd = [
+        "ffmpeg", "-y", "-loglevel", "error",
+        "-i", os.path.abspath(in_path),
+        "-vf", f"ass={ass_filename}",
+        "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+        "-c:a", "copy",
+        os.path.abspath(out_path),
+    ]
+    subprocess.run(cmd, check=True, cwd=out_dir)
+    return out_path
+
+
+# ---------------------------------------------------------------------------
+# Public interface
+# ---------------------------------------------------------------------------
+
+def crop_clip_local(
+    source_path: str,
+    start_time: float,
+    end_time: float,
+    aspect_ratio: str,
+    out_path: str,
+    words: Optional[List[Dict]] = None,
+) -> str:
+    """Cut + smart-reframe + (optionally) burn captions for one highlight."""
+    cut_path = out_path + ".cut.mp4"
+    framed_path = out_path + ".framed.mp4"
+    out_dir = os.path.dirname(os.path.abspath(out_path)) or "."
+    ass_filename = os.path.basename(out_path) + ".ass"
+    ass_path = os.path.join(out_dir, ass_filename)
+
+    try:
+        _cut_subclip(source_path, start_time, end_time, cut_path)
+        _reframe_vertical(cut_path, framed_path, aspect_ratio)
+
+        captioned = False
+        if words:
+            try:
+                probe = subprocess.run(
+                    [
+                        "ffprobe", "-v", "error",
+                        "-select_streams", "v:0",
+                        "-show_entries", "stream=width,height",
+                        "-of", "csv=p=0",
+                        framed_path,
+                    ],
+                    capture_output=True, text=True, check=True,
+                )
+                parts = probe.stdout.strip().split(",")
+                w, h = int(parts[0]), int(parts[1])
+
+                ass_content = _generate_ass(words, start_time, end_time, w, h)
+                if ass_content:
+                    with open(ass_path, "w", encoding="utf-8") as f:
+                        f.write(ass_content)
+                    _burn_captions(framed_path, out_path, ass_filename, out_dir)
+                    captioned = True
+            except Exception as e:
+                print(f"[clip/local] caption burn failed ({e}), skipping captions", flush=True)
+
+        if not captioned:
+            shutil.move(framed_path, out_path)
+            framed_path = None
+
+    finally:
+        for p in [cut_path, framed_path, ass_path]:
+            if p and os.path.exists(p):
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+
+    return out_path
+
+
+def crop_highlights_local(
+    source_path: str,
+    highlights: List[Dict],
+    aspect_ratio: str = "9:16",
+    out_dir: Optional[str] = None,
+    words: Optional[List[Dict]] = None,
+) -> List[Dict]:
+    out_dir = out_dir or LOCAL_OUTPUT_DIR
+    os.makedirs(out_dir, exist_ok=True)
+    results: List[Dict] = []
+    for i, h in enumerate(highlights, 1):
+        out_path = os.path.join(out_dir, f"short_{i:02d}.mp4")
+        print(f"[clip/local] {i}/{len(highlights)}: {h.get('title', '(untitled)')}", flush=True)
+        try:
+            crop_clip_local(
+                source_path,
+                float(h["start_time"]),
+                float(h["end_time"]),
+                aspect_ratio,
+                out_path,
+                words=words,
+            )
+            results.append({**h, "clip_url": out_path})
+        except Exception as e:
+            print(f"[clip/local] {i} failed: {e}", flush=True)
+            results.append({**h, "clip_url": None, "error": str(e)})
+    return results
