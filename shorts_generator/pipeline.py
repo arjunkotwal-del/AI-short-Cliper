@@ -55,12 +55,18 @@ def _run_local(
             # trim: keep from start, cap at MAX
             e = s + MAX_DURATION
         else:
-            # pad symmetrically to TARGET around the midpoint
-            mid = (s + e) / 2
-            half = TARGET / 2
-            s = max(0.0, mid - half)
-            e = min(video_duration, s + TARGET)
-            s = max(0.0, e - TARGET)  # re-anchor if we hit the end
+            # Asymmetric padding: 35% before the hook, 65% after the end
+            # so reactions and payoffs that land after the LLM's end_time get included.
+            pad = TARGET - dur
+            s = max(0.0, s - pad * 0.35)
+            e = min(video_duration, e + pad * 0.65)
+            # If we hit the video boundary, redistribute the remaining pad to the other side
+            actual = e - s
+            if actual < TARGET - 0.5:
+                if e >= video_duration:
+                    s = max(0.0, e - TARGET)
+                else:
+                    e = min(video_duration, s + TARGET)
         return {**h, "start_time": round(s, 3), "end_time": round(e, 3)}
 
     padded = [_pad_to_window(h) for h in ranked]

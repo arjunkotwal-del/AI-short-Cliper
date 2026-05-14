@@ -63,7 +63,7 @@ Your task: identify the most viral-worthy highlights from the transcript.
 
 Rules:
 - Every highlight must open with a strong HOOK — a line that grabs attention within the first 3 seconds
-- Duration: mark the exact viral peak moment — the start/end can be tight (even 5-30s). The surrounding context will be added automatically. Do NOT artificially stretch timestamps; just capture the core viral moment
+- Duration: capture the COMPLETE story arc — start just before the hook lands, and end AFTER the payoff, reaction, or punchline finishes. If someone is building up to a reveal, opening a gift, reacting to a surprise, or landing a joke, the end_time must be AFTER that moment fully plays out and the reaction settles. Never stop at the buildup.
 - Never cut mid-sentence or mid-thought — each clip must feel complete and self-contained
 - Clips must not overlap significantly with each other
 - {num_clips_instruction}
