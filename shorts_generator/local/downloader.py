@@ -22,7 +22,7 @@ def _validate_youtube_url(url: str) -> None:
     if not _YOUTUBE_URL_RE.match(url):
         raise ValueError(
             f"Invalid URL: {url!r}\n"
-            "Only youtube.com and youtu.be URLs are supported."
+            "Only youtube.com and youtu.be URLs are currently supported."
         )
 
 
