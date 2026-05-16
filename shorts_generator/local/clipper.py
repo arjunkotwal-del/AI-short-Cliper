@@ -473,6 +473,108 @@ def _burn_captions(in_path: str, out_path: str, ass_filename: str, out_dir: str)
 
 
 # ---------------------------------------------------------------------------
+# Silence / dead-air removal
+# ---------------------------------------------------------------------------
+
+def _remove_silence(
+    in_path: str,
+    out_path: str,
+    silence_db: float = -35.0,
+    min_silence_dur: float = 0.4,
+) -> str:
+    """Detect silent gaps and hard-cut them out.
+
+    Uses ffmpeg silencedetect to find gaps > min_silence_dur seconds at
+    < silence_db dBFS, then builds a filter_complex that trims + concatenates
+    only the non-silent segments.  Falls back to a plain copy if no silence
+    is found or if filtering fails.
+    """
+    import re as _re
+
+    # Step 1: detect silence
+    detect = subprocess.run(
+        [
+            "ffmpeg", "-i", in_path,
+            "-af", f"silencedetect=n={silence_db}dB:d={min_silence_dur}",
+            "-f", "null", "-",
+        ],
+        capture_output=True, text=True,
+    )
+    stderr = detect.stderr
+
+    starts = [float(m) for m in _re.findall(r"silence_start: (\S+)", stderr)]
+    ends   = [float(m) for m in _re.findall(r"silence_end: (\S+)", stderr)]
+
+    if not starts:
+        shutil.copy2(in_path, out_path)
+        return out_path
+
+    # Step 2: get total duration
+    try:
+        dur_probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "csv=p=0", in_path],
+            capture_output=True, text=True, check=True,
+        )
+        duration = float(dur_probe.stdout.strip())
+    except Exception:
+        shutil.copy2(in_path, out_path)
+        return out_path
+
+    # Step 3: build non-silent intervals
+    intervals = []
+    pos = 0.0
+    for i, ss in enumerate(starts):
+        if ss > pos + 0.05:
+            intervals.append((pos, ss))
+        pos = ends[i] if i < len(ends) else duration
+    if pos < duration - 0.05:
+        intervals.append((pos, duration))
+
+    if not intervals or (len(intervals) == 1 and intervals[0][0] < 0.1 and intervals[0][1] > duration - 0.1):
+        shutil.copy2(in_path, out_path)
+        return out_path
+
+    # Step 4: build filter_complex trim + concat
+    n = len(intervals)
+    filter_parts = []
+    v_labels, a_labels = [], []
+    for i, (s, e) in enumerate(intervals):
+        filter_parts.append(f"[0:v]trim={s:.3f}:{e:.3f},setpts=PTS-STARTPTS[v{i}]")
+        filter_parts.append(f"[0:a]atrim={s:.3f}:{e:.3f},asetpts=PTS-STARTPTS[a{i}]")
+        v_labels.append(f"[v{i}]")
+        a_labels.append(f"[a{i}]")
+
+    filter_parts.append("".join(v_labels) + f"concat=n={n}:v=1:a=0[vout]")
+    filter_parts.append("".join(a_labels) + f"concat=n={n}:v=0:a=1[aout]")
+
+    try:
+        subprocess.run(
+            [
+                "ffmpeg", "-y", "-loglevel", "error",
+                "-i", in_path,
+                "-filter_complex", ";".join(filter_parts),
+                "-map", "[vout]", "-map", "[aout]",
+                "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+                "-c:a", "aac", "-b:a", "128k",
+                out_path,
+            ],
+            check=True,
+        )
+        removed = len(intervals)
+        original_gaps = len(starts)
+        print(
+            f"[clip/local] silence removal: cut {original_gaps} gap(s), kept {removed} segment(s)",
+            flush=True,
+        )
+    except Exception as e:
+        print(f"[clip/local] silence removal failed ({e}), using original", flush=True)
+        shutil.copy2(in_path, out_path)
+
+    return out_path
+
+
+# ---------------------------------------------------------------------------
 # Thumbnail extraction
 # ---------------------------------------------------------------------------
 
@@ -514,6 +616,7 @@ def crop_clip_local(
 ) -> str:
     """Cut + smart-reframe + (optionally) burn captions for one highlight."""
     cut_path = out_path + ".cut.mp4"
+    dejumped_path = out_path + ".dejumped.mp4"
     framed_path = out_path + ".framed.mp4"
     out_dir = os.path.dirname(os.path.abspath(out_path)) or "."
     ass_filename = os.path.basename(out_path) + ".ass"
@@ -521,7 +624,8 @@ def crop_clip_local(
 
     try:
         _cut_subclip(source_path, start_time, end_time, cut_path)
-        _reframe_vertical(cut_path, framed_path, aspect_ratio)
+        _remove_silence(cut_path, dejumped_path)
+        _reframe_vertical(dejumped_path, framed_path, aspect_ratio)
 
         captioned = False
         if words or hook_sentence:
@@ -556,7 +660,7 @@ def crop_clip_local(
             framed_path = None
 
     finally:
-        for p in [cut_path, framed_path, ass_path]:
+        for p in [cut_path, dejumped_path, framed_path, ass_path]:
             if p and os.path.exists(p):
                 try:
                     os.remove(p)
