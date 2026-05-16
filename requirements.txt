@@ -1,2 +1,8 @@
-requests>=2.31
 python-dotenv>=1.0
+yt-dlp>=2024.1.1
+faster-whisper>=1.0.0
+openai>=1.0.0
+opencv-python>=4.8.0
+tqdm>=4.66.0
+# Uncomment for GPU (CUDA) Whisper transcription:
+# torch>=2.0

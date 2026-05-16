@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ffmpeg -version)",
+      "Bash(pip --version)",
+      "Bash(venv\\\\Scripts\\\\pip install *)",
+      "Bash(./venv/Scripts/pip install *)",
+      "Bash(./venv/Scripts/python main.py --help)",
+      "Bash(./venv/Scripts/python main.py \"https://www.youtube.com/watch?v=N6hy4zofMm0\" --mode local --num-clips 3)",
+      "Bash(ffprobe -v error -select_streams v:0 -show_entries stream=width,height,duration -of csv=p=0 output/short_01.mp4)",
+      "Bash(./venv/Scripts/python main.py \"https://www.youtube.com/watch?v=Lokjl_KDBdY\" --mode local --num-clips 30 --output-json result.json)",
+      "Bash(gh --version)",
+      "Bash(git --version)",
+      "Bash(mkdir -p \"C:/Users/user/OneDrive/Документы/GitHub/AI-short-generator\" && echo \"created\")",
+      "Bash(rsync -av --exclude=.git --exclude=.claude --exclude=venv --exclude=output --exclude=__pycache__ '--exclude=*.pyc' --exclude=result.json C:/Users/user/OneDrive/Документы/GitHub/AI-Youtube-Shorts-Generator/.claude/worktrees/tender-chebyshev-71e79d/ C:/Users/user/OneDrive/Документы/GitHub/AI-short-generator/)",
+      "Bash(./venv/Scripts/python -c \"import cv2; print\\('YuNet:', hasattr\\(cv2, 'FaceDetectorYN_create'\\)\\); import numpy; print\\('numpy ok'\\); print\\('cv2 version:', cv2.__version__\\)\")",
+      "Bash(python -c \"from shorts_generator.local.clipper import crop_clip_local, crop_highlights_local; print\\('imports OK'\\)\")",
+      "Bash(venv\\\\Scripts\\\\python.exe -c \"from shorts_generator.local.clipper import crop_clip_local, crop_highlights_local; print\\('imports OK'\\)\")"
+    ]
+  }
+}
