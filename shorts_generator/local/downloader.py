@@ -4,9 +4,24 @@ Returns a local mp4 path so the rest of the local pipeline can read it
 directly off disk.
 """
 import os
+import re
 from typing import Optional
 
 from ..config import LOCAL_OUTPUT_DIR
+
+_YOUTUBE_URL_RE = re.compile(
+    r"^https?://(www\.)?(youtube\.com|youtu\.be)/",
+    re.IGNORECASE,
+)
+
+
+def _validate_youtube_url(url: str) -> None:
+    """Raise ValueError if the URL is not a youtube.com / youtu.be URL."""
+    if not _YOUTUBE_URL_RE.match(url):
+        raise ValueError(
+            f"Invalid URL: {url!r}\n"
+            "Only youtube.com and youtu.be URLs are supported."
+        )
 
 
 def _import_ytdlp():
@@ -14,8 +29,8 @@ def _import_ytdlp():
         import yt_dlp  # type: ignore
     except ImportError as e:
         raise RuntimeError(
-            "yt-dlp is required for --mode local. Install it with:\n"
-            "    pip install -r requirements-local.txt"
+            "yt-dlp is required. Install it with:\n"
+            "    pip install -r requirements.txt"
         ) from e
     return yt_dlp
 
@@ -41,6 +56,7 @@ def _video_id_from_url(url: str) -> Optional[str]:
 
 def download_youtube_local(video_url: str, fmt: str = "720", out_dir: Optional[str] = None) -> str:
     """Download to disk and return the local mp4 path. Skips download if cached."""
+    _validate_youtube_url(video_url)
     yt_dlp = _import_ytdlp()
     out_dir = out_dir or LOCAL_OUTPUT_DIR
     os.makedirs(out_dir, exist_ok=True)

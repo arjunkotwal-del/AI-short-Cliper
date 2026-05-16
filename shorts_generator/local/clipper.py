@@ -671,10 +671,17 @@ def crop_clip_local(
 
 
 def _slug(title: str, idx: int, max_len: int = 45) -> str:
-    """Turn a clip title into a safe filename like '01_scared_to_open_the_gift.mp4'."""
+    """Turn a clip title into a safe filename like '01_scared_to_open_the_gift.mp4'.
+
+    Also strips ASS/ffmpeg filter-special characters so the filename can be
+    safely used inside an `ass=<filename>` ffmpeg -vf filter.
+    """
     import re
+    # Strip characters unsafe for filenames and ASS filter strings
     slug = re.sub(r"[^\w\s-]", "", title.lower())
     slug = re.sub(r"[\s_-]+", "_", slug).strip("_")
+    # Extra safety: remove any remaining shell/filter-special chars
+    slug = re.sub(r"[;:=\[\]{}()/\\]", "", slug)
     slug = slug[:max_len] or f"clip_{idx:02d}"
     return f"{idx:02d}_{slug}.mp4"
 

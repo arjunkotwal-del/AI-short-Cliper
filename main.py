@@ -16,7 +16,8 @@ def main() -> int:
     parser.add_argument("--num-clips", type=int, default=3, help="Max shorts to render (default: 3)")
     parser.add_argument("--min-score", type=int, default=0, help="Drop clips below this score 0-100 (default: 0 = keep all)")
     parser.add_argument("--aspect-ratio", default="9:16", help="Output aspect ratio (default: 9:16)")
-    parser.add_argument("--format", default="720", help="Source resolution: 360/480/720/1080 (default: 720)")
+    parser.add_argument("--format", default="720", choices=["360", "480", "720", "1080"],
+                        help="Source resolution (default: 720)")
     parser.add_argument("--language", default=None, help="Force Whisper language code e.g. 'en' (default: auto)")
     parser.add_argument("--output-json", default=None, help="Write full result JSON to this path")
     args = parser.parse_args()
