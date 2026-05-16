@@ -6,11 +6,12 @@ Two modes:
   * mode="local"            — yt-dlp + faster-whisper + OpenAI + ffmpeg/opencv.
                               Self-hosted, OPENAI_API_KEY required for the LLM.
 """
+import os
 from typing import Dict, List, Optional
 
 from .clipper import crop_highlights
 from .downloader import download_youtube
-from .highlights import call_muapi_llm, get_highlights
+from .highlights import call_muapi_llm, generate_social_copy, get_highlights
 from .transcriber import transcribe
 
 
@@ -88,6 +89,22 @@ def _run_local(
 
     words = transcript.get("words") or []
     shorts = crop_highlights_local(source_path, top, aspect_ratio=aspect_ratio, words=words or None)
+
+    # Generate social copy (.txt) for each successful clip
+    print("[pipeline/local] generating social captions...", flush=True)
+    for s in shorts:
+        if not s.get("clip_url"):
+            continue
+        try:
+            copy = generate_social_copy(s, llm_fn=call_openai_llm)
+            caption = copy.get("caption", "")
+            hashtags = " ".join(copy.get("hashtags", []))
+            txt_path = os.path.splitext(s["clip_url"])[0] + ".txt"
+            with open(txt_path, "w", encoding="utf-8") as f:
+                f.write(f"{caption}\n\n{hashtags}\n")
+            s["social_copy"] = copy
+        except Exception as e:
+            print(f"[pipeline/local] social copy failed for {s.get('title')}: {e}", flush=True)
 
     return {
         "mode": "local",

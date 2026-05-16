@@ -134,9 +134,9 @@ def detect_content_type(transcript: Dict, llm_fn: LLMFn = call_muapi_llm) -> Dic
         return {"content_type": "other", "density": "medium"}
 
 
-def build_transcript_text(transcript: Dict) -> str:
+def build_transcript_text(transcript: Dict, offset: float = 0.0) -> str:
     segments = transcript.get("segments", [])
-    return "\n".join(f"[{s['start']:.1f}s] {s['text'].strip()}" for s in segments)
+    return "\n".join(f"[{s['start'] - offset:.1f}s] {s['text'].strip()}" for s in segments)
 
 
 def chunk_transcript(transcript: Dict) -> List[Dict]:
@@ -238,7 +238,7 @@ def get_highlights(
         all_highlights: List[Dict] = []
         for i, chunk in enumerate(chunks):
             offset = chunk.get("_offset", 0)
-            text = build_transcript_text(chunk)
+            text = build_transcript_text(chunk, offset=offset)
             print(f"[highlights] chunk {i + 1}/{len(chunks)} (offset {offset:.0f}s)", flush=True)
             result = call_highlight_api(text, content_info, chunk["duration"], num_clips=num_clips, is_chunk=True, llm_fn=llm_fn)
             for h in result.get("highlights", []):
@@ -253,3 +253,39 @@ def get_highlights(
 
     highlights = [_recompute_score(h) for h in highlights]
     return {"highlights": highlights}
+
+
+# ---------------------------------------------------------------------------
+# Social copy generation (caption + hashtags per clip)
+# ---------------------------------------------------------------------------
+
+SOCIAL_COPY_PROMPT = """You are a viral social media strategist for TikTok, Instagram Reels, and YouTube Shorts.
+
+Given this clip, write:
+1. A punchy 150-character caption — hook the viewer instantly, no hashtags, use the energy of the moment
+2. 8 hashtags (mix of broad trending tags and niche-specific ones relevant to the content)
+
+Clip title: {title}
+Opening hook: {hook}
+Why it's viral: {reason}
+
+Respond ONLY with valid JSON: {{"caption": "...", "hashtags": ["#...", "#..."]}}"""
+
+
+def generate_social_copy(highlight: Dict, llm_fn: Optional[LLMFn] = None) -> Dict:
+    """Generate a TikTok/IG/Shorts caption and hashtags for a clip."""
+    llm_fn = llm_fn or call_muapi_llm
+    prompt = SOCIAL_COPY_PROMPT.format(
+        title=highlight.get("title", ""),
+        hook=highlight.get("hook_sentence", ""),
+        reason=highlight.get("virality_reason", ""),
+    )
+    try:
+        raw = llm_fn(prompt)
+        result = _parse_json_loose(raw)
+        return {
+            "caption": result.get("caption", ""),
+            "hashtags": result.get("hashtags", []),
+        }
+    except Exception:
+        return {"caption": "", "hashtags": []}
