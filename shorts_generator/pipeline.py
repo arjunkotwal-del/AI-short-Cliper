@@ -1,4 +1,6 @@
-"""End-to-end orchestrator (local mode only).
+"""End-to-end pipeline orchestrator.
+
+Downloads, transcribes, scores, and renders highlights in one call.
 
 Pipeline:
   yt-dlp  ->  faster-whisper  ->  OpenAI LLM scoring  ->  ffmpeg crop + captions
