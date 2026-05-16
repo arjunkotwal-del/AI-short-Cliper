@@ -1,5 +1,6 @@
 # AI YouTube Shorts Generator
 
+
 Automatically cut any YouTube video into viral-ready short clips. 100% free, no watermarks.  
 Give it a URL — it downloads, transcribes, scores every moment for virality, and renders polished vertical videos with animated word-level captions.
 
