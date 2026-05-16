@@ -558,9 +558,10 @@ def crop_highlights_local(
     out_dir = out_dir or LOCAL_OUTPUT_DIR
     os.makedirs(out_dir, exist_ok=True)
     results: List[Dict] = []
+    total = len(highlights)
     for i, h in enumerate(highlights, 1):
         out_path = os.path.join(out_dir, _slug(h.get("title", ""), i))
-        print(f"[clip/local] {i}/{len(highlights)}: {h.get('title', '(untitled)')}", flush=True)
+        print(f"[clip/local] {i}/{total}: {h.get('title', '(untitled)')}", flush=True)
         try:
             crop_clip_local(
                 source_path,
