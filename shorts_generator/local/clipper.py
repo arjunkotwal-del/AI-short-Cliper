@@ -97,11 +97,10 @@ def _get_face_cascade():
             _CASCADE_CACHE = False
             return None
 
-        # Copy to an ASCII temp path
-        tmp_dir = tempfile.gettempdir()
+        # Copy to a process-private ASCII temp path (avoids shared /tmp race)
+        tmp_dir = tempfile.mkdtemp(prefix="aishorts_cv_")
         dst_xml = os.path.join(tmp_dir, "haarcascade_frontalface_default.xml")
-        if not os.path.exists(dst_xml):
-            shutil.copy2(src_xml, dst_xml)
+        shutil.copy2(src_xml, dst_xml)
 
         cascade = cv2.CascadeClassifier(dst_xml)
         if cascade.empty():
@@ -125,7 +124,7 @@ def _probe_video(path: str) -> Tuple[int, int, float]:
             "-of", "csv=p=0",
             path,
         ],
-        capture_output=True, text=True, check=True,
+        capture_output=True, text=True, check=True, timeout=_FFMPEG_TIMEOUT,
     )
     parts = probe.stdout.strip().split(",")
     w, h = int(parts[0]), int(parts[1])
@@ -153,7 +152,7 @@ def _sample_frames(video_path: str, n_samples: int = 30) -> List[object]:
                 "-of", "csv=p=0",
                 video_path,
             ],
-            capture_output=True, text=True, check=True,
+            capture_output=True, text=True, check=True, timeout=_FFMPEG_TIMEOUT,
         )
         duration = float(dur_probe.stdout.strip())
 
@@ -169,7 +168,7 @@ def _sample_frames(video_path: str, n_samples: int = 30) -> List[object]:
                 "-pix_fmt", "bgr24",
                 "pipe:1",
             ]
-            result = subprocess.run(cmd, capture_output=True)
+            result = subprocess.run(cmd, capture_output=True, timeout=_FFMPEG_TIMEOUT)
             if result.returncode == 0 and len(result.stdout) == w * h * 3:
                 frame = np.frombuffer(result.stdout, dtype=np.uint8).reshape(h, w, 3)
                 frames.append(frame)
@@ -516,7 +515,7 @@ def _remove_silence(
             "-af", f"silencedetect=n={silence_db}dB:d={min_silence_dur}",
             "-f", "null", "-",
         ],
-        capture_output=True, text=True,
+        capture_output=True, text=True, timeout=_FFMPEG_TIMEOUT,
     )
     stderr = detect.stderr
 
@@ -532,7 +531,7 @@ def _remove_silence(
         dur_probe = subprocess.run(
             [FFPROBE, "-v", "error", "-show_entries", "format=duration",
              "-of", "csv=p=0", in_path],
-            capture_output=True, text=True, check=True,
+            capture_output=True, text=True, check=True, timeout=_FFMPEG_TIMEOUT,
         )
         duration = float(dur_probe.stdout.strip())
     except Exception:
@@ -577,7 +576,7 @@ def _remove_silence(
                 "-c:a", "aac", "-b:a", "128k",
                 out_path,
             ],
-            check=True,
+            check=True, timeout=_FFMPEG_TIMEOUT,
         )
         removed = len(intervals)
         original_gaps = len(starts)
@@ -602,7 +601,7 @@ def _extract_thumbnail(clip_path: str, thumb_path: str, at_pct: float = 0.25) ->
         dur_probe = subprocess.run(
             [FFPROBE, "-v", "error", "-show_entries", "format=duration",
              "-of", "csv=p=0", clip_path],
-            capture_output=True, text=True, check=True,
+            capture_output=True, text=True, check=True, timeout=_FFMPEG_TIMEOUT,
         )
         duration = float(dur_probe.stdout.strip())
         at = max(0.5, duration * at_pct)
@@ -656,7 +655,7 @@ def crop_clip_local(
                         "-of", "csv=p=0",
                         framed_path,
                     ],
-                    capture_output=True, text=True, check=True,
+                    capture_output=True, text=True, check=True, timeout=_FFMPEG_TIMEOUT,
                 )
                 parts = probe.stdout.strip().split(",")
                 w, h = int(parts[0]), int(parts[1])
