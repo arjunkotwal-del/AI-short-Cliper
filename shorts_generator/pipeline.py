@@ -84,8 +84,8 @@ def _run_local(
         if not overlap:
             kept.append(h)
 
-    top = kept
-    print(f"[pipeline/local] cropping {len(top)} of {len(all_highlights)} candidates", flush=True)
+    top = kept[:num_clips]
+    print(f"[pipeline/local] cropping {len(top)} of {len(all_highlights)} candidates (top {num_clips} requested)", flush=True)
 
     words = transcript.get("words") or []
     shorts = crop_highlights_local(source_path, top, aspect_ratio=aspect_ratio, words=words or None)
