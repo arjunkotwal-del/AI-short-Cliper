@@ -185,3 +185,5 @@ requirements.txt
 ## License
 
 MIT License
+
+Based in part on [SamurAIGPT/AI-Youtube-Shorts-Generator](https://github.com/SamurAIGPT/AI-Youtube-Shorts-Generator) (MIT License).
