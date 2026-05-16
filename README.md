@@ -159,7 +159,7 @@ LOCAL_WHISPER_MODEL=large-v3
 LOCAL_WHISPER_DEVICE=cuda
 ```
 
-`large-v3` on GPU is ~10x faster than `base` on CPU and noticeably more accurate on accents and fast speech.
+`large-v3` on GPU runs ~10x faster than `base` on CPU and noticeably more accurate on accents and fast speech.
 
 ---
 
