@@ -184,4 +184,4 @@ requirements.txt
 
 ## License
 
-MIT
+MIT License
