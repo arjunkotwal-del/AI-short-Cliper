@@ -242,48 +242,19 @@ OUT_H = 1280
 
 
 def _reframe_vertical(in_path: str, out_path: str, aspect_ratio: str) -> str:
-    """Smart vertical reframe: single crop or multi-panel split-screen."""
-    ar = _ratio(aspect_ratio)
-
-    try:
-        w, h, _ = _probe_video(in_path)
-    except Exception:
-        # Fallback: dumb center crop
-        return _center_crop_ffmpeg(in_path, out_path, ar)
-
-    # --- Face detection ---
-    frames = _sample_frames(in_path, n_samples=30)
-    detections = _detect_faces_in_frames(frames)
-    speakers = _cluster_speakers(detections, w, max_speakers=4)
-
-    if len(speakers) <= 1:
-        # No faces found or single speaker: center crop
-        if speakers:
-            cx = speakers[0][0]
-            print(f"[clip/framing] 1 speaker detected at x={cx} -> single crop", flush=True)
-        else:
-            cx = w // 2
-            print("[clip/framing] no faces detected -> center crop", flush=True)
-        return _single_crop_ffmpeg(in_path, out_path, w, h, cx, ar)
-
-    # --- Decide: single crop or split-screen ---
-    # Crop window width for 9:16 from the source height
-    crop_w = int(h * ar)
-    crop_w = min(crop_w, w)
-
-    leftmost = speakers[0][0]
-    rightmost = speakers[-1][0]
-    spread = rightmost - leftmost
-
-    if spread <= crop_w * 0.70:
-        # All speakers fit comfortably in one crop: center on their midpoint
-        center_x = (leftmost + rightmost) // 2
-        print(f"[clip/framing] {len(speakers)} speakers, spread={spread}px fits in crop={crop_w}px -> single crop at x={center_x}", flush=True)
-        return _single_crop_ffmpeg(in_path, out_path, w, h, center_x, ar)
-    else:
-        # Need split-screen
-        print(f"[clip/framing] {len(speakers)} speakers, spread={spread}px > {crop_w*0.70:.0f}px threshold -> {len(speakers)}-panel split-screen", flush=True)
-        return _split_screen_ffmpeg(in_path, out_path, w, h, speakers, ar)
+    """Letterbox the full horizontal frame into a 9:16 container with black bars top/bottom."""
+    print("[clip/framing] letterbox — full horizontal frame, black bars top/bottom", flush=True)
+    vf = f"scale={OUT_W}:-2,pad={OUT_W}:{OUT_H}:0:(oh-ih)/2:black"
+    cmd = [
+        "ffmpeg", "-y", "-loglevel", "error",
+        "-i", in_path,
+        "-vf", vf,
+        "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+        "-c:a", "copy",
+        out_path,
+    ]
+    subprocess.run(cmd, check=True)
+    return out_path
 
 
 def _center_crop_ffmpeg(in_path: str, out_path: str, ar: float) -> str:
@@ -393,18 +364,25 @@ def _fmt_ass_time(seconds: float) -> str:
     return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
 
 
+def _escape_ass(text: str) -> str:
+    """Escape special characters for an ASS dialogue line."""
+    return text.replace("\\", "\\\\").replace("{", "\\{").replace("}", "\\}").replace("\n", "\\N")
+
+
 def _generate_ass(
     words: List[Dict],
     clip_start: float,
     clip_end: float,
     width: int,
     height: int,
+    hook_sentence: Optional[str] = None,
 ) -> Optional[str]:
     """Build an ASS subtitle file with karaoke-style word highlighting.
 
     Primary colour (yellow) = active/just-spoken word.
     Secondary colour (white) = upcoming words in the same chunk.
     Each chunk pops in with a quick scale animation.
+    If hook_sentence is provided, it is burned as large top text for the first 2.5 s.
     """
     clip_words = []
     for w in words:
@@ -420,11 +398,13 @@ def _generate_ass(
                 "end": min(clip_end - clip_start, we - clip_start),
             })
 
-    if not clip_words:
+    if not clip_words and not hook_sentence:
         return None
 
     font_size = max(60, int(height * 0.055))
+    hook_size = max(72, int(height * 0.065))
     margin_v = max(60, int(height * 0.06))
+    margin_top = max(40, int(height * 0.04))
 
     header = f"""[Script Info]
 ScriptType: v4.00+
@@ -435,14 +415,24 @@ ScaledBorderAndShadow: yes
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
 Style: Pop,Impact,{font_size},&H0000FFFF,&H00FFFFFF,&H00000000,&HCC000000,-1,0,0,0,100,100,1,0,1,4,1,2,30,30,{margin_v},1
+Style: Hook,Impact,{hook_size},&H00FFFFFF,&H00FFFFFF,&H00000000,&HE6000000,-1,0,0,0,100,100,1,0,1,5,2,8,20,20,{margin_top},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
 
     events = []
-    chunks = [clip_words[i:i + _WORDS_PER_CHUNK] for i in range(0, len(clip_words), _WORDS_PER_CHUNK)]
 
+    # Hook overlay: top-center for first 2.5 seconds
+    if hook_sentence:
+        safe_hook = _escape_ass(hook_sentence.upper())
+        events.append(
+            f"Dialogue: 1,{_fmt_ass_time(0)},{_fmt_ass_time(2.5)},"
+            f"Hook,,0,0,0,,{{\\an8\\fscx90\\fscy90\\t(0,200,\\fscx100\\fscy100)}}{safe_hook}"
+        )
+
+    # Karaoke word chunks
+    chunks = [clip_words[i:i + _WORDS_PER_CHUNK] for i in range(0, len(clip_words), _WORDS_PER_CHUNK)]
     for chunk in chunks:
         chunk_start = chunk[0]["start"]
         chunk_end = chunk[-1]["end"]
@@ -456,13 +446,10 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             parts.append(f"{{\\k{dur_cs}}}{w['word']} ")
 
         text = "".join(parts).rstrip()
-        line = (
-            f"Dialogue: 0,"
-            f"{_fmt_ass_time(chunk_start)},"
-            f"{_fmt_ass_time(chunk_end)},"
+        events.append(
+            f"Dialogue: 0,{_fmt_ass_time(chunk_start)},{_fmt_ass_time(chunk_end)},"
             f"Pop,,0,0,0,,{text}"
         )
-        events.append(line)
 
     return header + "\n".join(events) + "\n"
 
@@ -496,6 +483,7 @@ def crop_clip_local(
     aspect_ratio: str,
     out_path: str,
     words: Optional[List[Dict]] = None,
+    hook_sentence: Optional[str] = None,
 ) -> str:
     """Cut + smart-reframe + (optionally) burn captions for one highlight."""
     cut_path = out_path + ".cut.mp4"
@@ -509,7 +497,7 @@ def crop_clip_local(
         _reframe_vertical(cut_path, framed_path, aspect_ratio)
 
         captioned = False
-        if words:
+        if words or hook_sentence:
             try:
                 probe = subprocess.run(
                     [
@@ -524,7 +512,10 @@ def crop_clip_local(
                 parts = probe.stdout.strip().split(",")
                 w, h = int(parts[0]), int(parts[1])
 
-                ass_content = _generate_ass(words, start_time, end_time, w, h)
+                ass_content = _generate_ass(
+                    words or [], start_time, end_time, w, h,
+                    hook_sentence=hook_sentence,
+                )
                 if ass_content:
                     with open(ass_path, "w", encoding="utf-8") as f:
                         f.write(ass_content)
@@ -569,6 +560,7 @@ def crop_highlights_local(
                 aspect_ratio,
                 out_path,
                 words=words,
+                hook_sentence=h.get("hook_sentence"),
             )
             results.append({**h, "clip_url": out_path})
         except Exception as e:
