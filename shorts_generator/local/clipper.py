@@ -539,6 +539,15 @@ def crop_clip_local(
     return out_path
 
 
+def _slug(title: str, idx: int, max_len: int = 45) -> str:
+    """Turn a clip title into a safe filename like '01_scared_to_open_the_gift.mp4'."""
+    import re
+    slug = re.sub(r"[^\w\s-]", "", title.lower())
+    slug = re.sub(r"[\s_-]+", "_", slug).strip("_")
+    slug = slug[:max_len] or f"clip_{idx:02d}"
+    return f"{idx:02d}_{slug}.mp4"
+
+
 def crop_highlights_local(
     source_path: str,
     highlights: List[Dict],
@@ -550,7 +559,7 @@ def crop_highlights_local(
     os.makedirs(out_dir, exist_ok=True)
     results: List[Dict] = []
     for i, h in enumerate(highlights, 1):
-        out_path = os.path.join(out_dir, f"short_{i:02d}.mp4")
+        out_path = os.path.join(out_dir, _slug(h.get("title", ""), i))
         print(f"[clip/local] {i}/{len(highlights)}: {h.get('title', '(untitled)')}", flush=True)
         try:
             crop_clip_local(
