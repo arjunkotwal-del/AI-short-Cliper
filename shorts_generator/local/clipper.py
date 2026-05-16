@@ -16,6 +16,24 @@ from typing import Dict, List, Optional, Tuple
 
 from ..config import LOCAL_OUTPUT_DIR
 
+# ---------------------------------------------------------------------------
+# Resolve ffmpeg / ffprobe at import time so PATH hijacking is caught early
+# ---------------------------------------------------------------------------
+
+def _resolve_binary(name: str) -> str:
+    path = shutil.which(name)
+    if not path:
+        raise RuntimeError(
+            f"{name!r} not found. Install ffmpeg and make sure it's on your PATH."
+        )
+    return path
+
+FFMPEG = _resolve_binary("ffmpeg")
+FFPROBE = _resolve_binary("ffprobe")
+
+# Subprocess timeout (seconds) — a hung ffmpeg call will be killed after this
+_FFMPEG_TIMEOUT = 600  # 10 min max per clip operation
+
 
 # ---------------------------------------------------------------------------
 # Aspect ratio helpers
@@ -35,7 +53,7 @@ def _ratio(aspect_ratio: str) -> float:
 
 def _cut_subclip(source_path: str, start: float, end: float, out_path: str) -> str:
     cmd = [
-        "ffmpeg", "-y", "-loglevel", "error",
+        FFMPEG, "-y", "-loglevel", "error",
         "-i", source_path,
         "-ss", f"{start:.3f}",
         "-to", f"{end:.3f}",
@@ -43,7 +61,7 @@ def _cut_subclip(source_path: str, start: float, end: float, out_path: str) -> s
         "-c:a", "aac", "-b:a", "128k",
         out_path,
     ]
-    subprocess.run(cmd, check=True)
+    subprocess.run(cmd, check=True, timeout=_FFMPEG_TIMEOUT)
     return out_path
 
 
@@ -101,7 +119,7 @@ def _probe_video(path: str) -> Tuple[int, int, float]:
     """Return (width, height, fps) via ffprobe."""
     probe = subprocess.run(
         [
-            "ffprobe", "-v", "error",
+            FFPROBE, "-v", "error",
             "-select_streams", "v:0",
             "-show_entries", "stream=width,height,r_frame_rate",
             "-of", "csv=p=0",
@@ -130,7 +148,7 @@ def _sample_frames(video_path: str, n_samples: int = 30) -> List[object]:
         # Get duration
         dur_probe = subprocess.run(
             [
-                "ffprobe", "-v", "error",
+                FFPROBE, "-v", "error",
                 "-show_entries", "format=duration",
                 "-of", "csv=p=0",
                 video_path,
@@ -143,7 +161,7 @@ def _sample_frames(video_path: str, n_samples: int = 30) -> List[object]:
         for i in range(n_samples):
             t = duration * i / max(1, n_samples - 1)
             cmd = [
-                "ffmpeg", "-y", "-loglevel", "error",
+                FFMPEG, "-y", "-loglevel", "error",
                 "-ss", f"{t:.3f}",
                 "-i", video_path,
                 "-frames:v", "1",
@@ -246,14 +264,14 @@ def _reframe_vertical(in_path: str, out_path: str, aspect_ratio: str) -> str:
     print("[clip/framing] letterbox — full horizontal frame, black bars top/bottom", flush=True)
     vf = f"scale={OUT_W}:-2,pad={OUT_W}:{OUT_H}:0:(oh-ih)/2:black"
     cmd = [
-        "ffmpeg", "-y", "-loglevel", "error",
+        FFMPEG, "-y", "-loglevel", "error",
         "-i", in_path,
         "-vf", vf,
         "-c:v", "libx264", "-preset", "fast", "-crf", "20",
         "-c:a", "copy",
         out_path,
     ]
-    subprocess.run(cmd, check=True)
+    subprocess.run(cmd, check=True, timeout=_FFMPEG_TIMEOUT)
     return out_path
 
 
@@ -263,14 +281,14 @@ def _center_crop_ffmpeg(in_path: str, out_path: str, ar: float) -> str:
         "crop=trunc(min(iw\\,ih*{r})/2)*2:ih:(iw-trunc(min(iw\\,ih*{r})/2)*2)/2:0"
     ).format(r=ar)
     cmd = [
-        "ffmpeg", "-y", "-loglevel", "error",
+        FFMPEG, "-y", "-loglevel", "error",
         "-i", in_path,
         "-vf", f"{crop_filter},scale={OUT_W}:{OUT_H}",
         "-c:v", "libx264", "-preset", "fast", "-crf", "20",
         "-c:a", "copy",
         out_path,
     ]
-    subprocess.run(cmd, check=True)
+    subprocess.run(cmd, check=True, timeout=_FFMPEG_TIMEOUT)
     return out_path
 
 
@@ -284,14 +302,14 @@ def _single_crop_ffmpeg(
     x = max(0, min(center_x - crop_w // 2, src_w - crop_w))
     crop_filter = f"crop={crop_w}:{src_h}:{x}:0,scale={OUT_W}:{OUT_H}"
     cmd = [
-        "ffmpeg", "-y", "-loglevel", "error",
+        FFMPEG, "-y", "-loglevel", "error",
         "-i", in_path,
         "-vf", crop_filter,
         "-c:v", "libx264", "-preset", "fast", "-crf", "20",
         "-c:a", "copy",
         out_path,
     ]
-    subprocess.run(cmd, check=True)
+    subprocess.run(cmd, check=True, timeout=_FFMPEG_TIMEOUT)
     return out_path
 
 
@@ -332,7 +350,7 @@ def _split_screen_ffmpeg(
     filter_complex = ";".join(filter_parts)
 
     cmd = [
-        "ffmpeg", "-y", "-loglevel", "error",
+        FFMPEG, "-y", "-loglevel", "error",
         "-i", in_path,
         "-filter_complex", filter_complex,
         "-map", "[v]",
@@ -341,7 +359,7 @@ def _split_screen_ffmpeg(
         "-c:a", "copy",
         out_path,
     ]
-    subprocess.run(cmd, check=True)
+    subprocess.run(cmd, check=True, timeout=_FFMPEG_TIMEOUT)
     return out_path
 
 
@@ -461,14 +479,14 @@ def _burn_captions(in_path: str, out_path: str, ass_filename: str, out_dir: str)
     avoiding Windows drive-letter colon escaping issues.
     """
     cmd = [
-        "ffmpeg", "-y", "-loglevel", "error",
+        FFMPEG, "-y", "-loglevel", "error",
         "-i", os.path.abspath(in_path),
         "-vf", f"ass={ass_filename}",
         "-c:v", "libx264", "-preset", "fast", "-crf", "20",
         "-c:a", "copy",
         os.path.abspath(out_path),
     ]
-    subprocess.run(cmd, check=True, cwd=out_dir)
+    subprocess.run(cmd, check=True, cwd=out_dir, timeout=_FFMPEG_TIMEOUT)
     return out_path
 
 
@@ -494,7 +512,7 @@ def _remove_silence(
     # Step 1: detect silence
     detect = subprocess.run(
         [
-            "ffmpeg", "-i", in_path,
+            FFMPEG, "-i", in_path,
             "-af", f"silencedetect=n={silence_db}dB:d={min_silence_dur}",
             "-f", "null", "-",
         ],
@@ -512,7 +530,7 @@ def _remove_silence(
     # Step 2: get total duration
     try:
         dur_probe = subprocess.run(
-            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+            [FFPROBE, "-v", "error", "-show_entries", "format=duration",
              "-of", "csv=p=0", in_path],
             capture_output=True, text=True, check=True,
         )
@@ -551,7 +569,7 @@ def _remove_silence(
     try:
         subprocess.run(
             [
-                "ffmpeg", "-y", "-loglevel", "error",
+                FFMPEG, "-y", "-loglevel", "error",
                 "-i", in_path,
                 "-filter_complex", ";".join(filter_parts),
                 "-map", "[vout]", "-map", "[aout]",
@@ -582,19 +600,19 @@ def _extract_thumbnail(clip_path: str, thumb_path: str, at_pct: float = 0.25) ->
     """Extract a single frame at at_pct of the clip duration as a JPEG thumbnail."""
     try:
         dur_probe = subprocess.run(
-            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+            [FFPROBE, "-v", "error", "-show_entries", "format=duration",
              "-of", "csv=p=0", clip_path],
             capture_output=True, text=True, check=True,
         )
         duration = float(dur_probe.stdout.strip())
         at = max(0.5, duration * at_pct)
         cmd = [
-            "ffmpeg", "-y", "-loglevel", "error",
+            FFMPEG, "-y", "-loglevel", "error",
             "-ss", f"{at:.3f}", "-i", clip_path,
             "-frames:v", "1", "-q:v", "2",
             thumb_path,
         ]
-        subprocess.run(cmd, check=True)
+        subprocess.run(cmd, check=True, timeout=_FFMPEG_TIMEOUT)
         return thumb_path
     except Exception as e:
         print(f"[clip/local] thumbnail failed ({e})", flush=True)
@@ -632,7 +650,7 @@ def crop_clip_local(
             try:
                 probe = subprocess.run(
                     [
-                        "ffprobe", "-v", "error",
+                        FFPROBE, "-v", "error",
                         "-select_streams", "v:0",
                         "-show_entries", "stream=width,height",
                         "-of", "csv=p=0",
