@@ -22,10 +22,17 @@ def _run_local(
     download_format: str,
     language: Optional[str],
 ) -> Dict:
+    import re as _re
     from .local.clipper import crop_highlights_local
     from .local.downloader import download_youtube_local
     from .local.llm import call_openai_llm
     from .local.transcriber import transcribe_local
+
+    # Per-video output subfolder so clips from different videos never mix
+    _vid_match = _re.search(r"(?:v=|youtu\.be/|/shorts/)([A-Za-z0-9_-]{11})", youtube_url)
+    _vid_id = _vid_match.group(1) if _vid_match else "unknown"
+    from .config import LOCAL_OUTPUT_DIR
+    video_out_dir = os.path.join(LOCAL_OUTPUT_DIR, _vid_id)
 
     source_path = download_youtube_local(youtube_url, fmt=download_format)
 
@@ -88,7 +95,7 @@ def _run_local(
     print(f"[pipeline/local] cropping {len(top)} of {len(all_highlights)} candidates (top {num_clips} requested)", flush=True)
 
     words = transcript.get("words") or []
-    shorts = crop_highlights_local(source_path, top, aspect_ratio=aspect_ratio, words=words or None)
+    shorts = crop_highlights_local(source_path, top, aspect_ratio=aspect_ratio, words=words or None, out_dir=video_out_dir)
 
     # Generate social copy (.txt) for each successful clip
     print("[pipeline/local] generating social captions...", flush=True)
