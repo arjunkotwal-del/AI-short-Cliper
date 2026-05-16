@@ -1,5 +1,7 @@
 """Local YouTube download via yt-dlp.
 
+Skips re-downloading if a cached source file already exists on disk.
+
 Returns a local mp4 path so the rest of the local pipeline can read it
 directly off disk.
 """
