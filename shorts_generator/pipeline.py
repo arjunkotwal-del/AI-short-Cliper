@@ -21,6 +21,7 @@ def _run_local(
     aspect_ratio: str,
     download_format: str,
     language: Optional[str],
+    min_score: int = 0,
 ) -> Dict:
     import re as _re
     from .local.clipper import crop_highlights_local
@@ -91,6 +92,9 @@ def _run_local(
         if not overlap:
             kept.append(h)
 
+    if min_score > 0:
+        kept = [h for h in kept if int(h.get("score", 0)) >= min_score]
+        print(f"[pipeline/local] {len(kept)} clips pass --min-score {min_score}", flush=True)
     top = kept[:num_clips]
     print(f"[pipeline/local] cropping {len(top)} of {len(all_highlights)} candidates (top {num_clips} requested)", flush=True)
 
@@ -163,6 +167,7 @@ def generate_shorts(
     download_format: str = "720",
     language: Optional[str] = None,
     mode: str = "api",
+    min_score: int = 0,
 ) -> Dict:
     """Run the full pipeline and return a structured result.
 
@@ -186,7 +191,7 @@ def generate_shorts(
     """
     mode = (mode or "api").lower()
     if mode == "local":
-        return _run_local(youtube_url, num_clips, aspect_ratio, download_format, language)
+        return _run_local(youtube_url, num_clips, aspect_ratio, download_format, language, min_score=min_score)
     if mode == "api":
         return _run_api(youtube_url, num_clips, aspect_ratio, download_format, language)
     raise ValueError(f"Unknown mode: {mode!r}. Use 'api' or 'local'.")
