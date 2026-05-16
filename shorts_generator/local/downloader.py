@@ -32,11 +32,26 @@ def _format_for(fmt: str) -> str:
     )
 
 
+def _video_id_from_url(url: str) -> Optional[str]:
+    """Extract YouTube video ID from a URL, or None if not parseable."""
+    import re
+    m = re.search(r"(?:v=|youtu\.be/|/shorts/)([A-Za-z0-9_-]{11})", url)
+    return m.group(1) if m else None
+
+
 def download_youtube_local(video_url: str, fmt: str = "720", out_dir: Optional[str] = None) -> str:
-    """Download to disk and return the local mp4 path."""
+    """Download to disk and return the local mp4 path. Skips download if cached."""
     yt_dlp = _import_ytdlp()
     out_dir = out_dir or LOCAL_OUTPUT_DIR
     os.makedirs(out_dir, exist_ok=True)
+
+    # Check cache first
+    vid_id = _video_id_from_url(video_url)
+    if vid_id:
+        cached = os.path.join(out_dir, f"source_{vid_id}.mp4")
+        if os.path.exists(cached) and os.path.getsize(cached) > 100_000:
+            print(f"[download/local] cache hit: {cached}", flush=True)
+            return cached
 
     print(f"[download/local] {video_url} @ {fmt}p -> {out_dir}/", flush=True)
     ydl_opts = {
