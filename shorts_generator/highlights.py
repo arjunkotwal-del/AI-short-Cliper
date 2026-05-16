@@ -82,7 +82,7 @@ Respond ONLY with valid JSON (no markdown, no explanation):
 CHUNK_SIZE_SECONDS = 1200       # 20-min chunks for long videos
 LONG_VIDEO_THRESHOLD = 1800     # chunk videos longer than 30 min
 CHUNK_OVERLAP_SECONDS = 60
-GPT_CALL_TIMEOUT_SECONDS = 300  # cap LLM polls at 5 min — a wedged call should fail fast
+GPT_CALL_TIMEOUT_SECONDS = 300  # 5-minute hard cap per LLM call
 
 
 
