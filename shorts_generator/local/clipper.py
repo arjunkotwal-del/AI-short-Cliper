@@ -473,6 +473,33 @@ def _burn_captions(in_path: str, out_path: str, ass_filename: str, out_dir: str)
 
 
 # ---------------------------------------------------------------------------
+# Thumbnail extraction
+# ---------------------------------------------------------------------------
+
+def _extract_thumbnail(clip_path: str, thumb_path: str, at_pct: float = 0.25) -> Optional[str]:
+    """Extract a single frame at at_pct of the clip duration as a JPEG thumbnail."""
+    try:
+        dur_probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "csv=p=0", clip_path],
+            capture_output=True, text=True, check=True,
+        )
+        duration = float(dur_probe.stdout.strip())
+        at = max(0.5, duration * at_pct)
+        cmd = [
+            "ffmpeg", "-y", "-loglevel", "error",
+            "-ss", f"{at:.3f}", "-i", clip_path,
+            "-frames:v", "1", "-q:v", "2",
+            thumb_path,
+        ]
+        subprocess.run(cmd, check=True)
+        return thumb_path
+    except Exception as e:
+        print(f"[clip/local] thumbnail failed ({e})", flush=True)
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Public interface
 # ---------------------------------------------------------------------------
 
@@ -572,7 +599,9 @@ def crop_highlights_local(
                 words=words,
                 hook_sentence=h.get("hook_sentence"),
             )
-            results.append({**h, "clip_url": out_path})
+            thumb_path = os.path.splitext(out_path)[0] + ".jpg"
+            _extract_thumbnail(out_path, thumb_path)
+            results.append({**h, "clip_url": out_path, "thumbnail": thumb_path})
         except Exception as e:
             print(f"[clip/local] {i} failed: {e}", flush=True)
             results.append({**h, "clip_url": None, "error": str(e)})
