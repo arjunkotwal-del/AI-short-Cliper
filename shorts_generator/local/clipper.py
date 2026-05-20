@@ -421,7 +421,7 @@ def _generate_ass(
     font_size = max(60, int(height * 0.055))
     hook_size = max(72, int(height * 0.065))
     margin_v = max(60, int(height * 0.06))
-    margin_top = max(40, int(height * 0.04))
+    margin_top = max(120, int(height * 0.15))
 
     header = f"""[Script Info]
 ScriptType: v4.00+
