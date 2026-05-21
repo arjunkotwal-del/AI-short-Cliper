@@ -64,8 +64,8 @@ def generate_shorts(
     ranked = sorted(all_highlights, key=lambda h: int(h.get("score", 0)), reverse=True)
     video_duration = float(transcript.get("duration", 0))
 
-    # 4. Pad each clip to 30-60 s (asymmetric: 35% before hook, 65% after payoff)
-    MIN_DUR, MAX_DUR, TARGET = 30.0, 60.0, 45.0
+    # 4. Pad each clip to 35-60 s (asymmetric: 20% before hook, 80% after payoff)
+    MIN_DUR, MAX_DUR, TARGET = 35.0, 60.0, 50.0
 
     def _pad(h: Dict) -> Dict:
         s, e = float(h["start_time"]), float(h["end_time"])
@@ -76,8 +76,8 @@ def generate_shorts(
             e = s + MAX_DUR
         else:
             pad = TARGET - dur
-            s = max(0.0, s - pad * 0.35)
-            e = min(video_duration, e + pad * 0.65)
+            s = max(0.0, s - pad * 0.20)
+            e = min(video_duration, e + pad * 0.80)
             if e - s < TARGET - 0.5:
                 s = max(0.0, e - TARGET) if e >= video_duration else s
                 e = min(video_duration, s + TARGET)
