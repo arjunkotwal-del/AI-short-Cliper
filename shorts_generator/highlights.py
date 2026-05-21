@@ -74,11 +74,15 @@ Content type: {content_type} | Density: {density}
 Your task: identify the most viral-worthy highlights from the transcript.
 
 Rules:
+- Find the SPECIFIC viral moment — the punchline, the shocking reveal, the funny reaction, the wild statement. That moment is the CENTER of the clip, not the end.
+- start_time should be 5-15 seconds BEFORE the viral moment — just enough setup so the viewer understands what's happening, no more. Cut out unnecessary buildup.
+- end_time should be 3-8 seconds AFTER the viral moment — enough for the reaction to land, then cut. Don't let it drag.
+- Target 20-40 seconds per clip. Tight and punchy beats long and complete.
 - Every highlight must open with a strong HOOK — a line that grabs attention within the first 3 seconds
-- Duration: capture the COMPLETE story arc — start just before the hook lands, and end AFTER the payoff, reaction, or punchline finishes. If someone is building up to a reveal, opening a gift, reacting to a surprise, or landing a joke, the end_time must be AFTER that moment fully plays out and the reaction settles. Never stop at the buildup.
 - Never cut mid-sentence or mid-thought — each clip must feel complete and self-contained
 - Clips must not overlap significantly with each other
 - {num_clips_instruction}
+- title must be short (3-6 words), punchy, and TikTok-style — think "he didn't see that coming" or "caught lying on camera" not "The Unexpected Revelation". Lowercase, no quotes, no generic words like "shocking" or "unexpected"
 - For each highlight, identify the single best "hook_sentence" — the opening line that would make someone stop scrolling. The hook_sentence MUST be clean — rephrase or pick a different line if the original contains profanity
 - Explain in one sentence why this clip is viral ("virality_reason")
 - Score each dimension independently then compute the weighted final score

@@ -21,7 +21,7 @@ YouTube URL
 [GPT-4o-mini]  score every segment on 4 dimensions -> pick top N
     |
     v
-[ffmpeg]  cut + silence removal + letterbox + burn ASS captions
+[ffmpeg]  cut + smart speaker crop (MediaPipe) + burn ASS captions
     |
     v
 output/{video_id}/01_title.mp4  +  .txt social copy
@@ -97,6 +97,7 @@ python main.py URL [options]
 | `--aspect-ratio W:H` | `9:16` | Output aspect ratio |
 | `--language CODE` | auto | Force Whisper language (e.g. `en`, `es`) |
 | `--output-dir PATH` | `./output` | Override output directory |
+| `--letterbox` | off | Disable smart speaker framing, use letterbox instead |
 | `--remove-silence` | off | Remove silent gaps from clips (off by default) |
 | `--output-json PATH` | — | Write full result JSON to this file |
 

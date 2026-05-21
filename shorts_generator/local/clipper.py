@@ -1,10 +1,11 @@
-"""Local clipping: ffmpeg subclip + face-aware vertical crop/split-screen + ASS captions.
+"""Local clipping: ffmpeg subclip + dynamic speaker crop + ASS captions.
 
 Pipeline per highlight:
   1. Cut [start, end] with ffmpeg.
-  2. Sample frames, detect faces, cluster into speaker groups (≤4).
-  3a. If all speakers fit in one 9:16 window → single crop centered on them.
-  3b. If speakers are spread out → filter_complex vstack split-screen (up to 4 panels).
+  2. Sample 1 frame/sec, detect faces with MediaPipe, cluster speakers.
+  3a. 0 faces → letterbox fallback.
+  3b. 1 speaker → smooth dynamic crop that pans to follow them.
+  3c. 2+ speakers → vertical split-screen, each panel tracks its speaker.
   4. Generate ASS subtitle file with word-level karaoke highlighting.
   5. Burn subtitles into the reframed video with ffmpeg.
 """
@@ -12,6 +13,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import urllib.request
 from typing import Dict, List, Optional, Tuple
 
 from ..config import LOCAL_OUTPUT_DIR
@@ -69,48 +71,33 @@ def _cut_subclip(source_path: str, start: float, end: float, out_path: str) -> s
 # Face detection helpers
 # ---------------------------------------------------------------------------
 
-_CASCADE_CACHE: Optional[object] = None  # cv2.CascadeClassifier or None sentinel
+_MP_MODEL_URL = "https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/latest/blaze_face_short_range.tflite"
+_MP_MODEL_BUFFER: Optional[bytes] = None  # cached in-memory after first load
 
 
-def _get_face_cascade():
-    """Return a cv2 Haar cascade for frontal faces, or None if unavailable.
+def _get_mediapipe_model() -> Optional[bytes]:
+    """Download (once) and cache the MediaPipe face detection model in memory.
 
-    OpenCV's C++ loader can't handle Unicode paths (the project lives under
-    'Документы'). We copy the XML to a temp dir with an ASCII-only path.
+    The .tflite file is ~225 KB.  We load via model_asset_buffer to avoid
+    Cyrillic/Unicode path issues in MediaPipe's C++ runtime.
     """
-    global _CASCADE_CACHE
-    if _CASCADE_CACHE is not None:
-        return _CASCADE_CACHE
+    global _MP_MODEL_BUFFER
+    if _MP_MODEL_BUFFER is not None:
+        return _MP_MODEL_BUFFER
+
+    cache_dir = os.path.join(tempfile.gettempdir(), "aishorts_models")
+    os.makedirs(cache_dir, exist_ok=True)
+    model_path = os.path.join(cache_dir, "blaze_face_short_range.tflite")
 
     try:
-        import cv2
-
-        # Find the cascade bundled with the cv2 package
-        cv2_dir = os.path.dirname(cv2.__file__)
-        candidates = [
-            os.path.join(cv2_dir, "data", "haarcascade_frontalface_default.xml"),
-            os.path.join(cv2_dir, "haarcascade_frontalface_default.xml"),
-        ]
-        src_xml = next((p for p in candidates if os.path.exists(p)), None)
-
-        if src_xml is None:
-            _CASCADE_CACHE = False
-            return None
-
-        # Copy to a process-private ASCII temp path (avoids shared /tmp race)
-        tmp_dir = tempfile.mkdtemp(prefix="aishorts_cv_")
-        dst_xml = os.path.join(tmp_dir, "haarcascade_frontalface_default.xml")
-        shutil.copy2(src_xml, dst_xml)
-
-        cascade = cv2.CascadeClassifier(dst_xml)
-        if cascade.empty():
-            _CASCADE_CACHE = False
-            return None
-
-        _CASCADE_CACHE = cascade
-        return cascade
-    except Exception:
-        _CASCADE_CACHE = False
+        if not os.path.exists(model_path):
+            print("[clip/face] downloading MediaPipe face model...", flush=True)
+            urllib.request.urlretrieve(_MP_MODEL_URL, model_path)
+        with open(model_path, "rb") as f:
+            _MP_MODEL_BUFFER = f.read()
+        return _MP_MODEL_BUFFER
+    except Exception as e:
+        print(f"[clip/face] MediaPipe model download failed: {e}", flush=True)
         return None
 
 
@@ -137,90 +124,111 @@ def _probe_video(path: str) -> Tuple[int, int, float]:
     return w, h, fps
 
 
-def _sample_frames(video_path: str, n_samples: int = 30) -> List[object]:
-    """Extract n_samples evenly-spaced frames as numpy arrays via ffmpeg pipe."""
+def _get_video_duration(path: str) -> float:
+    """Return video duration in seconds via ffprobe."""
+    dur_probe = subprocess.run(
+        [FFPROBE, "-v", "error", "-show_entries", "format=duration",
+         "-of", "csv=p=0", path],
+        capture_output=True, text=True, check=True, timeout=_FFMPEG_TIMEOUT,
+    )
+    return float(dur_probe.stdout.strip())
+
+
+def _sample_frames_1fps(video_path: str) -> List:
+    """Extract 1 frame per second as numpy arrays via a single ffmpeg call.
+
+    Uses the fps=1 filter so ffmpeg decodes once and outputs all frames
+    through a pipe — much faster than one subprocess per frame.
+    """
     try:
         import numpy as np
 
-        w, h, fps = _probe_video(video_path)
+        w, h, _ = _probe_video(video_path)
 
-        # Get duration
-        dur_probe = subprocess.run(
-            [
-                FFPROBE, "-v", "error",
-                "-show_entries", "format=duration",
-                "-of", "csv=p=0",
-                video_path,
-            ],
-            capture_output=True, text=True, check=True, timeout=_FFMPEG_TIMEOUT,
-        )
-        duration = float(dur_probe.stdout.strip())
+        cmd = [
+            FFMPEG, "-y", "-loglevel", "error",
+            "-i", video_path,
+            "-vf", "fps=1",
+            "-f", "rawvideo",
+            "-pix_fmt", "rgb24",
+            "pipe:1",
+        ]
+        result = subprocess.run(cmd, capture_output=True, timeout=_FFMPEG_TIMEOUT)
+        if result.returncode != 0:
+            return []
 
+        raw = result.stdout
+        frame_bytes = w * h * 3
+        n_frames = len(raw) // frame_bytes
         frames = []
-        for i in range(n_samples):
-            t = duration * i / max(1, n_samples - 1)
-            cmd = [
-                FFMPEG, "-y", "-loglevel", "error",
-                "-ss", f"{t:.3f}",
-                "-i", video_path,
-                "-frames:v", "1",
-                "-f", "rawvideo",
-                "-pix_fmt", "bgr24",
-                "pipe:1",
-            ]
-            result = subprocess.run(cmd, capture_output=True, timeout=_FFMPEG_TIMEOUT)
-            if result.returncode == 0 and len(result.stdout) == w * h * 3:
-                frame = np.frombuffer(result.stdout, dtype=np.uint8).reshape(h, w, 3)
-                frames.append(frame)
+        for i in range(n_frames):
+            start = i * frame_bytes
+            frame = np.frombuffer(raw[start:start + frame_bytes], dtype=np.uint8).reshape(h, w, 3)
+            frames.append(frame)
         return frames
-    except Exception:
+    except Exception as e:
+        print(f"[clip/face] frame sampling failed: {e}", flush=True)
         return []
 
 
-def _detect_faces_in_frames(frames: List[object]) -> List[Tuple[int, int, int]]:
-    """Return list of (cx, cy, area) face detections across all frames."""
-    cascade = _get_face_cascade()
-    if cascade is None or not frames:
-        return []
+def _detect_faces_mediapipe(frames: List) -> List[List[Tuple[int, int, int]]]:
+    """Run MediaPipe face detection on each frame.
+
+    Returns a list-of-lists: per_frame_detections[i] = [(cx, cy, area), ...]
+    for frame i.  Each detection is in pixel coordinates of the source frame.
+    """
+    model_buf = _get_mediapipe_model()
+    if model_buf is None or not frames:
+        return [[] for _ in frames]
 
     try:
-        import cv2
-        detections = []
+        import mediapipe as mp
+
+        base_options = mp.tasks.BaseOptions(model_asset_buffer=model_buf)
+        options = mp.tasks.vision.FaceDetectorOptions(
+            base_options=base_options,
+            min_detection_confidence=0.5,
+        )
+        detector = mp.tasks.vision.FaceDetector.create_from_options(options)
+
+        per_frame: List[List[Tuple[int, int, int]]] = []
         for frame in frames:
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            faces = cascade.detectMultiScale(
-                gray,
-                scaleFactor=1.1,
-                minNeighbors=5,
-                minSize=(30, 30),
-            )
-            if len(faces) > 0:
-                for (x, y, fw, fh) in faces:
-                    cx = x + fw // 2
-                    cy = y + fh // 2
-                    detections.append((cx, cy, fw * fh))
-        return detections
-    except Exception:
-        return []
+            image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame)
+            result = detector.detect(image)
+            dets = []
+            h, w = frame.shape[:2]
+            for det in result.detections:
+                bb = det.bounding_box
+                cx = bb.origin_x + bb.width // 2
+                cy = bb.origin_y + bb.height // 2
+                area = bb.width * bb.height
+                dets.append((cx, cy, area))
+            per_frame.append(dets)
+
+        detector.close()
+        return per_frame
+    except Exception as e:
+        print(f"[clip/face] MediaPipe detection failed: {e}", flush=True)
+        return [[] for _ in frames]
 
 
 def _cluster_speakers(
-    detections: List[Tuple[int, int, int]],
+    per_frame_dets: List[List[Tuple[int, int, int]]],
     src_w: int,
     max_speakers: int = 4,
 ) -> List[Tuple[int, int]]:
-    """Greedy proximity clustering → list of (cx, cy) speaker centers, sorted left-to-right.
+    """Cluster all face detections across frames into speaker positions.
 
-    Two detections merge into the same cluster if their horizontal centers are
-    within 20% of the source width.
+    Returns list of (cx, cy) speaker centers sorted left-to-right.
     """
-    if not detections:
+    all_dets = [d for frame_dets in per_frame_dets for d in frame_dets]
+    if not all_dets:
         return []
 
-    proximity = src_w * 0.20
+    proximity = src_w * 0.35
     clusters: List[List[Tuple[int, int, int]]] = []
 
-    for det in detections:
+    for det in all_dets:
         cx = det[0]
         assigned = False
         for cluster in clusters:
@@ -232,11 +240,15 @@ def _cluster_speakers(
         if not assigned:
             clusters.append([det])
 
-    # Sort clusters by total area (prominence) descending, take top max_speakers
+    # Drop tiny clusters (< 10% of total detections) — likely noise / brief glances
+    min_count = max(2, len(all_dets) * 0.10)
+    clusters = [c for c in clusters if len(c) >= min_count] or clusters[:1]
+
+    # Keep the most prominent speakers
     clusters.sort(key=lambda c: sum(d[2] for d in c), reverse=True)
     clusters = clusters[:max_speakers]
 
-    # Compute weighted centroid per cluster (weight = area)
+    # Weighted centroid per cluster
     centers = []
     for cluster in clusters:
         total_area = sum(d[2] for d in cluster)
@@ -244,9 +256,102 @@ def _cluster_speakers(
         cy = int(sum(d[1] * d[2] for d in cluster) / total_area)
         centers.append((cx, cy))
 
-    # Sort left-to-right for consistent panel ordering
     centers.sort(key=lambda c: c[0])
     return centers
+
+
+# ---------------------------------------------------------------------------
+# Dynamic crop: per-second keyframes with smooth interpolation
+# ---------------------------------------------------------------------------
+
+def _build_crop_keyframes(
+    per_frame_dets: List[List[Tuple[int, int, int]]],
+    src_w: int,
+    src_h: int,
+    target_speaker: Optional[Tuple[int, int]] = None,
+) -> List[Tuple[float, int]]:
+    """Build a list of (time_sec, crop_center_x) keyframes from per-frame detections.
+
+    If target_speaker is given, prefer detections near that speaker's x position.
+    Falls back to frame center when no face is detected in a frame.
+    """
+    proximity = src_w * 0.25
+    keyframes: List[Tuple[float, int]] = []
+
+    for t, dets in enumerate(per_frame_dets):
+        if dets and target_speaker:
+            # Pick the detection closest to the target speaker
+            best = min(dets, key=lambda d: abs(d[0] - target_speaker[0]))
+            if abs(best[0] - target_speaker[0]) < proximity:
+                keyframes.append((float(t), best[0]))
+            else:
+                keyframes.append((float(t), target_speaker[0]))
+        elif dets:
+            # No target — use the largest face
+            biggest = max(dets, key=lambda d: d[2])
+            keyframes.append((float(t), biggest[0]))
+        else:
+            # No detection — hold previous position or use center
+            if keyframes:
+                keyframes.append((float(t), keyframes[-1][1]))
+            else:
+                keyframes.append((float(t), src_w // 2))
+
+    return keyframes
+
+
+def _smooth_keyframes(keyframes: List[Tuple[float, int]], window: int = 3) -> List[Tuple[float, int]]:
+    """Apply a rolling average to keyframe x positions for gentle panning."""
+    if len(keyframes) <= 1:
+        return keyframes
+
+    smoothed = []
+    half = window // 2
+    for i in range(len(keyframes)):
+        start = max(0, i - half)
+        end = min(len(keyframes), i + half + 1)
+        avg_x = int(sum(kf[1] for kf in keyframes[start:end]) / (end - start))
+        smoothed.append((keyframes[i][0], avg_x))
+    return smoothed
+
+
+def _build_crop_x_expr(keyframes: List[Tuple[float, int]], crop_w: int, src_w: int) -> str:
+    """Build an ffmpeg expression string for the crop x position.
+
+    Linearly interpolates between keyframe positions so the crop pans smoothly.
+    Each keyframe is (time_sec, center_x).  The expression clamps x so the
+    crop window stays within [0, src_w - crop_w].
+    """
+    max_x = src_w - crop_w
+
+    if not keyframes:
+        x = max(0, min(src_w // 2 - crop_w // 2, max_x))
+        return str(x)
+
+    if len(keyframes) == 1:
+        x = max(0, min(keyframes[0][1] - crop_w // 2, max_x))
+        return str(x)
+
+    # Convert center_x → left_x, clamped
+    def _left(cx: int) -> int:
+        return max(0, min(cx - crop_w // 2, max_x))
+
+    # Build nested if(lt(t,t1), lerp(x0,x1), if(...))
+    # Working from the last segment backwards
+    parts = str(_left(keyframes[-1][1]))
+    for i in range(len(keyframes) - 2, -1, -1):
+        t0 = keyframes[i][0]
+        t1 = keyframes[i + 1][0]
+        x0 = _left(keyframes[i][1])
+        x1 = _left(keyframes[i + 1][1])
+        dt = t1 - t0
+        if dt < 0.01:
+            dt = 1.0
+        # Linear interpolation: x0 + (x1-x0) * (t-t0) / (t1-t0)
+        lerp = f"{x0}+({x1}-{x0})*(t-{t0:.1f})/{dt:.1f}"
+        parts = f"if(lt(t\\,{t1:.1f})\\,{lerp}\\,{parts})"
+
+    return parts
 
 
 # ---------------------------------------------------------------------------
@@ -274,32 +379,22 @@ def _reframe_vertical(in_path: str, out_path: str, aspect_ratio: str) -> str:
     return out_path
 
 
-def _center_crop_ffmpeg(in_path: str, out_path: str, ar: float) -> str:
-    """Pure center-crop fallback — no face detection."""
-    crop_filter = (
-        "crop=trunc(min(iw\\,ih*{r})/2)*2:ih:(iw-trunc(min(iw\\,ih*{r})/2)*2)/2:0"
-    ).format(r=ar)
-    cmd = [
-        FFMPEG, "-y", "-loglevel", "error",
-        "-i", in_path,
-        "-vf", f"{crop_filter},scale={OUT_W}:{OUT_H}",
-        "-c:v", "libx264", "-preset", "fast", "-crf", "20",
-        "-c:a", "copy",
-        out_path,
-    ]
-    subprocess.run(cmd, check=True, timeout=_FFMPEG_TIMEOUT)
-    return out_path
-
-
-def _single_crop_ffmpeg(
-    in_path: str, out_path: str, src_w: int, src_h: int, center_x: int, ar: float
+def _dynamic_single_crop(
+    in_path: str,
+    out_path: str,
+    keyframes: List[Tuple[float, int]],
+    src_w: int,
+    src_h: int,
+    ar: float,
 ) -> str:
-    """Crop to ar ratio centered on center_x, scale to OUT_W x OUT_H."""
-    crop_w = int(src_h * ar)
-    crop_w = min(crop_w, src_w)
-    # Clamp x so crop doesn't go out of bounds
-    x = max(0, min(center_x - crop_w // 2, src_w - crop_w))
-    crop_filter = f"crop={crop_w}:{src_h}:{x}:0,scale={OUT_W}:{OUT_H}"
+    """Dynamically crop to follow a single speaker using smooth keyframe interpolation."""
+    crop_w = min(int(src_h * ar), src_w)
+    # Make crop_w even for ffmpeg
+    crop_w = crop_w - (crop_w % 2)
+
+    x_expr = _build_crop_x_expr(keyframes, crop_w, src_w)
+    crop_filter = f"crop={crop_w}:{src_h}:{x_expr}:0,scale={OUT_W}:{OUT_H}"
+
     cmd = [
         FFMPEG, "-y", "-loglevel", "error",
         "-i", in_path,
@@ -312,37 +407,37 @@ def _single_crop_ffmpeg(
     return out_path
 
 
-def _split_screen_ffmpeg(
+def _dynamic_split_screen(
     in_path: str,
     out_path: str,
+    per_frame_dets: List[List[Tuple[int, int, int]]],
+    speakers: List[Tuple[int, int]],
     src_w: int,
     src_h: int,
-    speakers: List[Tuple[int, int]],
     ar: float,
 ) -> str:
-    """Build a vertical split-screen with one panel per speaker."""
-    n = len(speakers)
-    panel_h = OUT_H // n  # each panel height in output pixels
-    panel_w = OUT_W       # full output width for each panel
+    """Build a vertical split-screen where each panel dynamically tracks its speaker."""
+    n = min(len(speakers), 2)  # cap at 2 panels for clean look
+    panel_h = OUT_H // n
+    panel_w = OUT_W
 
-    # Each panel: crop a 9:16 window around the speaker, scale to panel_w x panel_h
-    # The crop from source: width = src_h * (panel_w / panel_h), height = src_h
-    panel_ar = panel_w / panel_h  # same as overall ar for uniform panels
-    crop_w = int(src_h * panel_ar)
-    crop_w = min(crop_w, src_w)
+    panel_ar = panel_w / panel_h
+    crop_w = min(int(src_h * panel_ar), src_w)
+    crop_w = crop_w - (crop_w % 2)
 
     filter_parts = []
     panel_labels = []
 
-    for i, (cx, cy) in enumerate(speakers):
-        x = max(0, min(cx - crop_w // 2, src_w - crop_w))
+    for i in range(n):
+        kf = _build_crop_keyframes(per_frame_dets, src_w, src_h, target_speaker=speakers[i])
+        kf = _smooth_keyframes(kf)
+        x_expr = _build_crop_x_expr(kf, crop_w, src_w)
         label = f"p{i}"
         filter_parts.append(
-            f"[0:v]crop={crop_w}:{src_h}:{x}:0,scale={panel_w}:{panel_h}[{label}]"
+            f"[0:v]crop={crop_w}:{src_h}:{x_expr}:0,scale={panel_w}:{panel_h}[{label}]"
         )
         panel_labels.append(f"[{label}]")
 
-    # Stack panels vertically
     stack_inputs = "".join(panel_labels)
     filter_parts.append(f"{stack_inputs}vstack=inputs={n}[v]")
 
@@ -360,6 +455,55 @@ def _split_screen_ffmpeg(
     ]
     subprocess.run(cmd, check=True, timeout=_FFMPEG_TIMEOUT)
     return out_path
+
+
+def _smart_reframe(in_path: str, out_path: str, aspect_ratio: str) -> str:
+    """Detect faces and choose the best framing strategy automatically.
+
+    - 0 faces → letterbox fallback
+    - 1 speaker → smooth dynamic crop following them
+    - 2+ speakers → split-screen with per-panel tracking
+    """
+    ar = _ratio(aspect_ratio)
+    src_w, src_h, _ = _probe_video(in_path)
+
+    # Sample 1 frame per second
+    frames = _sample_frames_1fps(in_path)
+    if not frames:
+        print("[clip/framing] no frames sampled — letterbox fallback", flush=True)
+        return _reframe_vertical(in_path, out_path, aspect_ratio)
+
+    # Detect faces in every frame
+    per_frame_dets = _detect_faces_mediapipe(frames)
+    total_faces = sum(len(d) for d in per_frame_dets)
+    frames_with_faces = sum(1 for d in per_frame_dets if d)
+
+    if total_faces == 0:
+        print("[clip/framing] no faces detected — letterbox fallback", flush=True)
+        return _reframe_vertical(in_path, out_path, aspect_ratio)
+
+    print(f"[clip/framing] {total_faces} face detections in {frames_with_faces}/{len(frames)} frames", flush=True)
+
+    # Heuristic: if the vast majority of frames show at most 1 face,
+    # this is a single-speaker video — skip clustering and track directly.
+    multi_face_frames = sum(1 for d in per_frame_dets if len(d) >= 2)
+    single_speaker_heuristic = multi_face_frames < len(frames) * 0.25
+
+    # Cluster into speaker positions
+    speakers = _cluster_speakers(per_frame_dets, src_w)
+
+    if single_speaker_heuristic and len(speakers) > 1:
+        print(f"[clip/framing] heuristic override: {multi_face_frames}/{len(frames)} multi-face frames — treating as 1 speaker", flush=True)
+        speakers = speakers[:1]
+
+    if len(speakers) == 1:
+        print(f"[clip/framing] 1 speaker — dynamic crop tracking", flush=True)
+        kf = _build_crop_keyframes(per_frame_dets, src_w, src_h, target_speaker=speakers[0])
+        kf = _smooth_keyframes(kf)
+        return _dynamic_single_crop(in_path, out_path, kf, src_w, src_h, ar)
+    else:
+        print(f"[clip/framing] {len(speakers)} speakers — split-screen", flush=True)
+        return _dynamic_split_screen(in_path, out_path, per_frame_dets, speakers, src_w, src_h, ar)
 
 
 # ---------------------------------------------------------------------------
@@ -639,8 +783,9 @@ def crop_clip_local(
     words: Optional[List[Dict]] = None,
     hook_sentence: Optional[str] = None,
     remove_silence: bool = False,
+    letterbox: bool = False,
 ) -> str:
-    """Cut + letterbox reframe + (optionally) burn captions for one highlight."""
+    """Cut + smart reframe (or letterbox) + (optionally) burn captions for one highlight."""
     cut_path = out_path + ".cut.mp4"
     dejumped_path = out_path + ".dejumped.mp4"
     framed_path = out_path + ".framed.mp4"
@@ -654,7 +799,10 @@ def crop_clip_local(
             _remove_silence(cut_path, dejumped_path)
         else:
             shutil.copy2(cut_path, dejumped_path)
-        _reframe_vertical(dejumped_path, framed_path, aspect_ratio)
+        if letterbox:
+            _reframe_vertical(dejumped_path, framed_path, aspect_ratio)
+        else:
+            _smart_reframe(dejumped_path, framed_path, aspect_ratio)
 
         captioned = False
         if words or hook_sentence:
@@ -722,6 +870,7 @@ def crop_highlights_local(
     out_dir: Optional[str] = None,
     words: Optional[List[Dict]] = None,
     remove_silence: bool = False,
+    letterbox: bool = False,
 ) -> List[Dict]:
     out_dir = out_dir or LOCAL_OUTPUT_DIR
     os.makedirs(out_dir, exist_ok=True)
@@ -740,6 +889,7 @@ def crop_highlights_local(
                 words=words,
                 hook_sentence=h.get("hook_sentence"),
                 remove_silence=remove_silence,
+                letterbox=letterbox,
             )
             thumb_path = os.path.splitext(out_path)[0] + ".jpg"
             _extract_thumbnail(out_path, thumb_path)

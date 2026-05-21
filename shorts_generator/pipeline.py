@@ -24,6 +24,7 @@ def generate_shorts(
     min_score: int = 0,
     output_dir: Optional[str] = None,
     remove_silence: bool = False,
+    letterbox: bool = False,
 ) -> Dict:
     """Run the full local pipeline and return a structured result.
 
@@ -92,8 +93,8 @@ def generate_shorts(
                     return min(w_end, video_duration)
         return min(end_time + max_scan, video_duration)
 
-    # 4. Pad each clip to 35-60 s (asymmetric: 20% before hook, 80% after payoff)
-    MIN_DUR, MAX_DUR, TARGET = 35.0, 60.0, 50.0
+    # 4. Pad each clip to 20-60 s (asymmetric: 20% before hook, 80% after payoff)
+    MIN_DUR, MAX_DUR, TARGET = 20.0, 60.0, 35.0
 
     def _pad(h: Dict) -> Dict:
         s, e = float(h["start_time"]), float(h["end_time"])
@@ -139,6 +140,7 @@ def generate_shorts(
         words=words or None,
         out_dir=video_out_dir,
         remove_silence=remove_silence,
+        letterbox=letterbox,
     )
 
     # 8. Generate social copy (.txt sidecar) for each successful clip
