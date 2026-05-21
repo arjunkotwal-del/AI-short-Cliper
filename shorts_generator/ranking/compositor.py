@@ -374,6 +374,58 @@ def reframe_clip(in_path: str, out_path: str, width: int, height: int,
 
 # ── Per-clip assembly ─────────────────────────────────────────────────────────
 
+def _make_announcement_clip(
+    overlay_png: str,
+    tts_audio: str,
+    tts_duration: float,
+    width: int,
+    height: int,
+    out_path: str,
+) -> str:
+    """Brief black-frame clip with overlay + TTS audio at full volume.
+
+    This plays BEFORE the actual clip so the voice is always clearly audible.
+    Duration = TTS length + 0.4 s of silence padding.
+    """
+    total_dur = tts_duration + 0.4
+    cmd = [
+        _FFMPEG, "-y", "-loglevel", "error",
+        # black video source
+        "-f", "lavfi", "-i", f"color=c=black:size={width}x{height}:rate=30",
+        # overlay PNG
+        "-i", overlay_png,
+        # TTS audio
+        "-i", tts_audio,
+        "-filter_complex",
+        # overlay on black, then pad audio to exactly total_dur
+        f"[0:v][1:v]overlay=0:0[vout];"
+        f"[2:a]apad,atrim=0:{total_dur:.3f}[aout]",
+        "-map", "[vout]", "-map", "[aout]",
+        "-t", f"{total_dur:.3f}",
+        "-c:v", "libx264", "-preset", "fast", "-crf", "20", "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", "192k",
+        out_path,
+    ]
+    subprocess.run(cmd, check=True, timeout=_TIMEOUT)
+    return out_path
+
+
+def _apply_overlay(clip_path: str, overlay_png: str, out_path: str) -> str:
+    """Overlay ranking PNG on clip, preserving original audio untouched."""
+    cmd = [
+        _FFMPEG, "-y", "-loglevel", "error",
+        "-i", clip_path,
+        "-i", overlay_png,
+        "-filter_complex", "[0:v][1:v]overlay=0:0[vout]",
+        "-map", "[vout]", "-map", "0:a?",
+        "-c:v", "libx264", "-preset", "fast", "-crf", "20", "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", "192k",
+        out_path,
+    ]
+    subprocess.run(cmd, check=True, timeout=_TIMEOUT)
+    return out_path
+
+
 def assemble_rank_clip(
     clip_path: str,
     rank: int,
@@ -383,42 +435,41 @@ def assemble_rank_clip(
     commentary_duration: float,
     out_path: str,
 ) -> str:
-    """Overlay ranking PNG + mix TTS commentary with audio ducking."""
-    if commentary_audio and os.path.exists(commentary_audio) and commentary_duration > 0:
-        duck_expr = f"if(lt(t,{commentary_duration:.2f}),0.15,1.0)"
-        filter_complex = (
-            f"[0:v][1:v]overlay=0:0[vout];"
-            f"[0:a]volume='{duck_expr}':eval=frame[ducked];"
-            f"[2:a]volume=1.8[hook];"
-            f"[ducked][hook]amix=inputs=2:duration=first:"
-            f"dropout_transition=0:normalize=0[aout]"
-        )
-        cmd = [
-            _FFMPEG, "-y", "-loglevel", "error",
-            "-i", clip_path,
-            "-i", overlay_png,
-            "-i", commentary_audio,
-            "-filter_complex", filter_complex,
-            "-map", "[vout]", "-map", "[aout]",
-            "-c:v", "libx264", "-preset", "fast", "-crf", "20", "-pix_fmt", "yuv420p",
-            "-c:a", "aac", "-b:a", "192k",
-            out_path,
-        ]
-    else:
-        filter_complex = "[0:v][1:v]overlay=0:0[vout]"
-        cmd = [
-            _FFMPEG, "-y", "-loglevel", "error",
-            "-i", clip_path,
-            "-i", overlay_png,
-            "-filter_complex", filter_complex,
-            "-map", "[vout]", "-map", "0:a?",
-            "-c:v", "libx264", "-preset", "fast", "-crf", "20", "-pix_fmt", "yuv420p",
-            "-c:a", "aac", "-b:a", "192k",
-            out_path,
-        ]
+    """Build a rank clip as: [announcement] + [clip with overlay].
 
-    subprocess.run(cmd, check=True, timeout=_TIMEOUT)
-    return out_path
+    The announcement is a brief black-frame segment where the voice reads
+    the rank label at full volume — no ducking, no mixing complexity.
+    The actual clip follows immediately with its original audio fully intact.
+    """
+    tmp_dir = tempfile.mkdtemp(prefix="rank_assemble_")
+    try:
+        w, h, _ = _probe(clip_path)
+        parts: List[str] = []
+
+        # Part 1: announcement (voice reads label over black + overlay)
+        if commentary_audio and os.path.exists(commentary_audio) and commentary_duration > 0:
+            ann_path = os.path.join(tmp_dir, "announcement.mp4")
+            _make_announcement_clip(
+                overlay_png, commentary_audio, commentary_duration,
+                w, h, ann_path,
+            )
+            parts.append(ann_path)
+
+        # Part 2: actual clip with overlay PNG (original audio preserved)
+        clip_overlay = os.path.join(tmp_dir, "clip_overlay.mp4")
+        _apply_overlay(clip_path, overlay_png, clip_overlay)
+        parts.append(clip_overlay)
+
+        # Concat announcement + clip
+        if len(parts) == 1:
+            import shutil as _shutil
+            _shutil.copy2(parts[0], out_path)
+        else:
+            concat_clips(parts, out_path)
+
+        return out_path
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 # ── Final concat ──────────────────────────────────────────────────────────────

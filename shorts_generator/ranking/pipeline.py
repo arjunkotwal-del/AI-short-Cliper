@@ -118,11 +118,12 @@ def generate_ranking_shorts(
                 title=title,
             )
 
-            # 3c: TTS reads the clip label (e.g. "Funny Goof")
-            print(f"[ranking] synthesizing label TTS: \"{label}\"", flush=True)
+            # 3c: TTS announces the rank + label (e.g. "Number 3... Playful Chaos")
+            announcement = f"Number {rank}... {label.title()}"
+            print(f"[ranking] synthesizing announcement TTS: \"{announcement}\"", flush=True)
             label_mp3 = os.path.join(clip_tmp, "label_tts.mp3")
             try:
-                synthesize_tts(label, label_mp3)
+                synthesize_tts(announcement, label_mp3)
                 label_dur = get_audio_duration(label_mp3)
                 print(f"[ranking]   -> {label_dur:.1f}s", flush=True)
             except Exception as e:
