@@ -91,7 +91,7 @@ def generate_scene_videos(
                 prompt_image=image_uri,
                 prompt_text=motion_prompt,
                 duration=duration,
-                ratio="720:1280",  # 9:16 vertical
+                ratio="768:1280",  # vertical
             )
 
             task_id = task.id

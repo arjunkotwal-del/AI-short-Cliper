@@ -14,16 +14,20 @@ from ..config import OPENAI_MODEL, require_openai_key
 
 
 # Base skeleton character prompt — every scene image uses this as foundation
+# NOTE: "educational medical diagram" and "non-sexual" wording prevents OpenAI moderation flags
 SKELETON_BASE = (
-    "ultra realistic medical anatomy visualization, full body transparent human figure with "
-    "clear glass-like skin revealing the complete human skeleton inside, anatomically "
-    "accurate bones including skull, rib cage, spine, pelvis, arms, hands, legs and feet "
-    "clearly visible through the transparent body shell, "
-    "bones have a natural realistic ivory / pale yellow bone color with subtle beige tones, "
-    "realistic bone texture and shading, medical-grade anatomical accuracy, "
-    "outer body made of clear translucent silicone or glass material, smooth human body "
-    "shape surrounding the skeleton while remaining fully transparent, "
-    "extremely detailed bones, photorealistic 3D render, ultra sharp focus"
+    "educational medical anatomy diagram, scientific skeleton visualization, "
+    "full body transparent glass mannequin with complete human skeleton visible inside, "
+    "anatomically accurate bones including skull, rib cage, spine, pelvis, arms, hands, legs and feet, "
+    "bones have natural ivory pale yellow color with realistic bone texture, "
+    "outer shell is clear translucent glass material shaped like a featureless mannequin, "
+    "non-sexual, fully clothed appearance, smooth featureless surface, no skin details, "
+    "front facing symmetrical pose, standing upright, "
+    "arms slightly extended outward from the sides, legs straight, feet flat, "
+    "full body visible from head to toes, perfectly centered in frame, "
+    "plain white studio background, soft neutral studio lighting, subtle shadow under the feet, "
+    "extremely detailed bones, photorealistic 3D render, clean scientific visualization style, "
+    "ultra sharp focus, minimal environment, no extra objects"
 )
 
 
@@ -112,8 +116,7 @@ def generate_script(user_prompt: str) -> Dict:
 
         # Combine skeleton base with scene-specific context
         scene["image_prompt"] = (
-            f"{SKELETON_BASE}, {scene['scene_context']}, "
-            "plain dark background, soft dramatic studio lighting, subtle shadow under the feet"
+            f"{SKELETON_BASE}, {scene['scene_context']}"
         )
 
     title = script.get("title", "ai generated short")
