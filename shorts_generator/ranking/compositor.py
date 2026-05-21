@@ -263,16 +263,19 @@ def make_title_card_video(
 ) -> str:
     """Convert a PNG into a short MP4, optionally with a TTS audio track."""
     if audio_path and os.path.exists(audio_path):
-        # Mix TTS voice with silence pad so the video is exactly `duration` long
+        # Upmix TTS (mono 24kHz) → stereo 44100 Hz, pad to duration
         cmd = [
             _FFMPEG, "-y", "-loglevel", "error",
             "-loop", "1", "-i", png_path,
             "-i", audio_path,
+            "-filter_complex",
+            f"[1:a]aresample=44100,pan=stereo|c0=c0|c1=c0,"
+            f"apad,atrim=0:{duration:.3f}[aout]",
+            "-map", "0:v", "-map", "[aout]",
             "-t", f"{duration:.2f}",
             "-vf", f"scale={width}:{height}",
             "-c:v", "libx264", "-preset", "fast", "-crf", "20", "-pix_fmt", "yuv420p",
             "-c:a", "aac", "-b:a", "192k",
-            "-shortest",
             out_path,
         ]
     else:
@@ -283,7 +286,7 @@ def make_title_card_video(
             "-t", f"{duration:.2f}",
             "-vf", f"scale={width}:{height}",
             "-c:v", "libx264", "-preset", "fast", "-crf", "20", "-pix_fmt", "yuv420p",
-            "-c:a", "aac", "-b:a", "128k",
+            "-c:a", "aac", "-b:a", "192k",
             "-shortest",
             out_path,
         ]
@@ -394,12 +397,13 @@ def _make_announcement_clip(
         "-f", "lavfi", "-i", f"color=c=black:size={width}x{height}:rate=30",
         # overlay PNG
         "-i", overlay_png,
-        # TTS audio
+        # TTS audio (mono 24kHz from OpenAI)
         "-i", tts_audio,
         "-filter_complex",
-        # overlay on black, then pad audio to exactly total_dur
+        # overlay on black; upmix TTS to stereo 44100 Hz and pad to total_dur
         f"[0:v][1:v]overlay=0:0[vout];"
-        f"[2:a]apad,atrim=0:{total_dur:.3f}[aout]",
+        f"[2:a]aresample=44100,pan=stereo|c0=c0|c1=c0,"
+        f"apad,atrim=0:{total_dur:.3f}[aout]",
         "-map", "[vout]", "-map", "[aout]",
         "-t", f"{total_dur:.3f}",
         "-c:v", "libx264", "-preset", "fast", "-crf", "20", "-pix_fmt", "yuv420p",
@@ -411,13 +415,15 @@ def _make_announcement_clip(
 
 
 def _apply_overlay(clip_path: str, overlay_png: str, out_path: str) -> str:
-    """Overlay ranking PNG on clip, preserving original audio untouched."""
+    """Overlay ranking PNG on clip; normalise audio to stereo 44100 Hz."""
     cmd = [
         _FFMPEG, "-y", "-loglevel", "error",
         "-i", clip_path,
         "-i", overlay_png,
-        "-filter_complex", "[0:v][1:v]overlay=0:0[vout]",
-        "-map", "[vout]", "-map", "0:a?",
+        "-filter_complex",
+        "[0:v][1:v]overlay=0:0[vout];"
+        "[0:a]aresample=44100,pan=stereo|c0=c0|c1=c1[aout]",
+        "-map", "[vout]", "-map", "[aout]",
         "-c:v", "libx264", "-preset", "fast", "-crf", "20", "-pix_fmt", "yuv420p",
         "-c:a", "aac", "-b:a", "192k",
         out_path,
