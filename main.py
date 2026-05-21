@@ -20,6 +20,8 @@ def main() -> int:
                         help="Source resolution (default: 720)")
     parser.add_argument("--language", default=None, help="Force Whisper language code e.g. 'en' (default: auto)")
     parser.add_argument("--output-json", default=None, help="Write full result JSON to this path")
+    parser.add_argument("--output-dir", default=None, help="Override output directory (default: from .env or ~/shorts-output)")
+    parser.add_argument("--face-track", action="store_true", help="Enable face-tracking crop (requires opencv-python)")
     args = parser.parse_args()
 
     try:
@@ -30,6 +32,8 @@ def main() -> int:
             download_format=args.format,
             language=args.language,
             min_score=args.min_score,
+            output_dir=args.output_dir,
+            face_track=args.face_track,
         )
     except Exception as e:
         print(f"\nFAILED: {e}", file=sys.stderr)
@@ -50,6 +54,13 @@ def main() -> int:
             print(f"     clip:   {s['clip_url']}")
         else:
             print(f"     clip:   FAILED ({s.get('error')})")
+
+    # Print the output folder path so it's easy to find
+    if result["shorts"]:
+        first_clip = next((s["clip_url"] for s in result["shorts"] if s.get("clip_url")), None)
+        if first_clip:
+            import os
+            print(f"\nOutput folder: {os.path.abspath(os.path.dirname(first_clip))}")
 
     if args.output_json:
         with open(args.output_json, "w") as f:

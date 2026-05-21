@@ -54,6 +54,14 @@ TREND (20% weight) — Is this riding a current cultural wave?
   - Real-time relevance increases share probability and algorithm boost
 
 Final score = round(hook*0.35 + flow*0.20 + value*0.25 + trend*0.20) as a 0-100 integer.
+
+CALIBRATION — Use the full 0-100 range honestly:
+  - 90-100: Genuinely exceptional, would go viral with millions of views
+  - 70-89: Strong content, would perform well on shorts platforms
+  - 50-69: Decent but not standout — average engagement expected
+  - 30-49: Below average, weak hook or incomplete payoff
+  - 0-29: Poor content, no viral potential
+Most clips should score between 50-80. A score above 90 should be rare (1 in 10 clips).
 """
 
 
@@ -70,8 +78,9 @@ Rules:
 - Duration: capture the COMPLETE story arc — start just before the hook lands, and end AFTER the payoff, reaction, or punchline finishes. If someone is building up to a reveal, opening a gift, reacting to a surprise, or landing a joke, the end_time must be AFTER that moment fully plays out and the reaction settles. Never stop at the buildup.
 - Never cut mid-sentence or mid-thought — each clip must feel complete and self-contained
 - Clips must not overlap significantly with each other
+- No two highlights may cover the same moment — each highlight must start at least 30 seconds after the previous one ends
 - {num_clips_instruction}
-- For each highlight, identify the single best "hook_sentence" — the opening line that would make someone stop scrolling
+- For each highlight, identify the single best "hook_sentence" — the opening line that would make someone stop scrolling. The hook_sentence MUST be clean — rephrase or pick a different line if the original contains profanity
 - Explain in one sentence why this clip is viral ("virality_reason")
 - Score each dimension independently then compute the weighted final score
 
@@ -176,22 +185,29 @@ def _recompute_score(h: Dict) -> Dict:
 
 
 def dedupe_highlights(highlights: List[Dict]) -> List[Dict]:
-    """Drop a highlight if it overlaps >50% with a higher-scoring one already kept."""
+    """Drop a highlight if it overlaps >50% or starts within 15s of a higher-scoring one."""
     highlights = sorted(highlights, key=lambda x: int(x.get("score", 0)), reverse=True)
     kept: List[Dict] = []
     for h in highlights:
         h_start = float(h["start_time"])
         h_end = float(h["end_time"])
         h_dur = h_end - h_start
-        overlapping = False
+        skip = False
         for k in kept:
-            latest_start = max(h_start, float(k["start_time"]))
-            earliest_end = min(h_end, float(k["end_time"]))
+            k_start = float(k["start_time"])
+            k_end = float(k["end_time"])
+            # Proximity check: skip if starts within 15s of a kept clip's start
+            if abs(h_start - k_start) < 15.0:
+                skip = True
+                break
+            # Overlap check: skip if >50% overlap
+            latest_start = max(h_start, k_start)
+            earliest_end = min(h_end, k_end)
             overlap = earliest_end - latest_start
             if overlap > 0 and overlap > 0.5 * h_dur:
-                overlapping = True
+                skip = True
                 break
-        if not overlapping:
+        if not skip:
             kept.append(h)
     return kept
 

@@ -22,6 +22,8 @@ def generate_shorts(
     download_format: str = "720",
     language: Optional[str] = None,
     min_score: int = 0,
+    output_dir: Optional[str] = None,
+    face_track: bool = False,
 ) -> Dict:
     """Run the full local pipeline and return a structured result.
 
@@ -45,7 +47,8 @@ def generate_shorts(
     _m = re.search(r"(?:v=|youtu\.be/|/shorts/)([A-Za-z0-9_-]{11})", youtube_url)
     vid_id = _m.group(1) if _m else "unknown"
     from .config import LOCAL_OUTPUT_DIR
-    video_out_dir = os.path.join(LOCAL_OUTPUT_DIR, vid_id)
+    base_dir = output_dir or LOCAL_OUTPUT_DIR
+    video_out_dir = os.path.join(base_dir, vid_id)
 
     # 1. Download
     source_path = download_youtube_local(youtube_url, fmt=download_format)
@@ -63,16 +66,39 @@ def generate_shorts(
 
     ranked = sorted(all_highlights, key=lambda h: int(h.get("score", 0)), reverse=True)
     video_duration = float(transcript.get("duration", 0))
+    words_list: List[Dict] = transcript.get("words") or []
+
+    def _snap_to_sentence_end(end_time: float, max_scan: float = 15.0) -> float:
+        """Snap end_time forward to the nearest sentence boundary using word timestamps.
+
+        A sentence boundary is a word whose text ends with . ? ! or has a gap of
+        >= 0.7s to the next word. Falls back to end_time + max_scan if nothing found.
+        """
+        import re as _re
+        deadline = end_time + max_scan
+        words_after = [w for w in words_list if float(w.get("start", 0)) >= end_time]
+        for i, w in enumerate(words_after):
+            w_end = float(w.get("end", 0))
+            if w_end > deadline:
+                break
+            text = w.get("word", "").strip()
+            # sentence-ending punctuation
+            if _re.search(r"[.!?]$", text):
+                return min(w_end, video_duration)
+            # long pause to next word = natural end of thought
+            if i + 1 < len(words_after):
+                gap = float(words_after[i + 1].get("start", 0)) - w_end
+                if gap >= 0.7:
+                    return min(w_end, video_duration)
+        return min(end_time + max_scan, video_duration)
 
     # 4. Pad each clip to 35-60 s (asymmetric: 20% before hook, 80% after payoff)
     MIN_DUR, MAX_DUR, TARGET = 35.0, 60.0, 50.0
 
-    TAIL_BUFFER = 12.0  # always extend end by this many seconds so speech finishes
-
     def _pad(h: Dict) -> Dict:
         s, e = float(h["start_time"]), float(h["end_time"])
-        # Always push the end forward so the speaker finishes their thought
-        e = min(video_duration, e + TAIL_BUFFER)
+        # Snap end to nearest sentence boundary so speaker finishes their thought
+        e = _snap_to_sentence_end(e, max_scan=15.0)
         dur = e - s
         if dur > MAX_DUR:
             e = s + MAX_DUR
@@ -112,6 +138,7 @@ def generate_shorts(
         aspect_ratio=aspect_ratio,
         words=words or None,
         out_dir=video_out_dir,
+        face_track=face_track,
     )
 
     # 8. Generate social copy (.txt sidecar) for each successful clip
