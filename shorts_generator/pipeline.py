@@ -67,14 +67,16 @@ def generate_shorts(
     # 4. Pad each clip to 35-60 s (asymmetric: 20% before hook, 80% after payoff)
     MIN_DUR, MAX_DUR, TARGET = 35.0, 60.0, 50.0
 
+    TAIL_BUFFER = 12.0  # always extend end by this many seconds so speech finishes
+
     def _pad(h: Dict) -> Dict:
         s, e = float(h["start_time"]), float(h["end_time"])
+        # Always push the end forward so the speaker finishes their thought
+        e = min(video_duration, e + TAIL_BUFFER)
         dur = e - s
-        if MIN_DUR <= dur <= MAX_DUR:
-            return h
         if dur > MAX_DUR:
             e = s + MAX_DUR
-        else:
+        elif dur < MIN_DUR:
             pad = TARGET - dur
             s = max(0.0, s - pad * 0.20)
             e = min(video_duration, e + pad * 0.80)
