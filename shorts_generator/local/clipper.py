@@ -968,8 +968,8 @@ def _overlay_hook_with_ducking(
         "-filter_complex",
         (
             f"[0:a]volume='{duck_expr}':eval=frame[ducked];"
-            f"[1:a]adelay=0|0[hook];"
-            f"[ducked][hook]amix=inputs=2:duration=first:dropout_transition=0[aout]"
+            f"[1:a]volume=2.5[hook];"
+            f"[ducked][hook]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]"
         ),
         "-map", "0:v",
         "-map", "[aout]",
