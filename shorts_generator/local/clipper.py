@@ -912,6 +912,76 @@ def _extract_thumbnail(clip_path: str, thumb_path: str, at_pct: float = 0.25) ->
 
 
 # ---------------------------------------------------------------------------
+# TTS hook voiceover + audio ducking
+# ---------------------------------------------------------------------------
+
+def _generate_hook_tts(hook_sentence: str, out_path: str) -> Optional[str]:
+    """Generate TTS audio for the hook sentence using OpenAI TTS.
+
+    Returns path to mp3 file or None on failure.
+    """
+    try:
+        from openai import OpenAI
+        from ..config import require_openai_key
+
+        client = OpenAI(api_key=require_openai_key(), timeout=60, max_retries=2)
+        response = client.audio.speech.create(
+            model="tts-1",
+            voice="onyx",
+            input=hook_sentence,
+            response_format="mp3",
+        )
+        response.stream_to_file(out_path)
+        return out_path
+    except Exception as e:
+        print(f"[clip/hook] TTS failed: {e}", flush=True)
+        return None
+
+
+def _get_audio_duration(path: str) -> float:
+    """Get audio file duration in seconds."""
+    r = subprocess.run(
+        [FFPROBE, "-v", "error", "-show_entries", "format=duration",
+         "-of", "csv=p=0", path],
+        capture_output=True, text=True, check=True, timeout=_FFMPEG_TIMEOUT,
+    )
+    return float(r.stdout.strip())
+
+
+def _overlay_hook_with_ducking(
+    video_path: str,
+    hook_audio_path: str,
+    hook_duration: float,
+    out_path: str,
+    duck_level: float = 0.15,
+) -> str:
+    """Overlay hook TTS at start of clip, duck original audio during it.
+
+    Original audio at 15% during hook, snaps back to 100% after.
+    """
+    duck_expr = f"if(lt(t,{hook_duration:.2f}),{duck_level},1.0)"
+
+    cmd = [
+        FFMPEG, "-y", "-loglevel", "error",
+        "-i", video_path,
+        "-i", hook_audio_path,
+        "-filter_complex",
+        (
+            f"[0:a]volume='{duck_expr}':eval=frame[ducked];"
+            f"[1:a]adelay=0|0[hook];"
+            f"[ducked][hook]amix=inputs=2:duration=first:dropout_transition=0[aout]"
+        ),
+        "-map", "0:v",
+        "-map", "[aout]",
+        "-c:v", "copy",
+        "-c:a", "aac", "-b:a", "192k",
+        out_path,
+    ]
+    subprocess.run(cmd, check=True, timeout=_FFMPEG_TIMEOUT)
+    return out_path
+
+
+# ---------------------------------------------------------------------------
 # Public interface
 # ---------------------------------------------------------------------------
 
@@ -926,10 +996,12 @@ def crop_clip_local(
     remove_silence: bool = False,
     letterbox: bool = False,
 ) -> str:
-    """Cut + smart reframe (or letterbox) + (optionally) burn captions for one highlight."""
+    """Cut + smart reframe (or letterbox) + captions + TTS hook voiceover."""
     cut_path = out_path + ".cut.mp4"
     dejumped_path = out_path + ".dejumped.mp4"
     framed_path = out_path + ".framed.mp4"
+    hooked_path = out_path + ".hooked.mp4"
+    hook_mp3 = out_path + ".hook.mp3"
     out_dir = os.path.dirname(os.path.abspath(out_path)) or "."
     ass_filename = os.path.basename(out_path) + ".ass"
     ass_path = os.path.join(out_dir, ass_filename)
@@ -945,7 +1017,9 @@ def crop_clip_local(
         else:
             _smart_reframe(dejumped_path, framed_path, aspect_ratio)
 
+        # Burn captions
         captioned = False
+        captioned_path = framed_path
         if words or hook_sentence:
             try:
                 probe = subprocess.run(
@@ -968,18 +1042,42 @@ def crop_clip_local(
                 if ass_content:
                     with open(ass_path, "w", encoding="utf-8") as f:
                         f.write(ass_content)
-                    _burn_captions(framed_path, out_path, ass_filename, out_dir)
+                    captioned_out = out_path + ".captioned.mp4"
+                    _burn_captions(framed_path, captioned_out, ass_filename, out_dir)
+                    captioned_path = captioned_out
                     captioned = True
             except Exception as e:
                 print(f"[clip/local] caption burn failed ({e}), skipping captions", flush=True)
 
-        if not captioned:
-            shutil.move(framed_path, out_path)
-            framed_path = None
+        # TTS hook voiceover with audio ducking
+        hook_applied = False
+        if hook_sentence:
+            tts_path = _generate_hook_tts(hook_sentence, hook_mp3)
+            if tts_path:
+                try:
+                    hook_dur = _get_audio_duration(tts_path)
+                    print(f"[clip/hook] \"{hook_sentence[:50]}\" ({hook_dur:.1f}s)", flush=True)
+                    _overlay_hook_with_ducking(
+                        captioned_path, tts_path, hook_dur, out_path,
+                    )
+                    hook_applied = True
+                except Exception as e:
+                    print(f"[clip/hook] overlay failed: {e}", flush=True)
+
+        if not hook_applied:
+            if captioned_path != out_path:
+                shutil.copy2(captioned_path, out_path)
+
+        # Clean up captioned intermediate if it's separate
+        if captioned and captioned_path != framed_path and captioned_path != out_path:
+            try:
+                os.remove(captioned_path)
+            except OSError:
+                pass
 
     finally:
-        for p in [cut_path, dejumped_path, framed_path, ass_path]:
-            if p and os.path.exists(p):
+        for p in [cut_path, dejumped_path, framed_path, ass_path, hook_mp3]:
+            if p and os.path.exists(p) and p != out_path:
                 try:
                     os.remove(p)
                 except OSError:
