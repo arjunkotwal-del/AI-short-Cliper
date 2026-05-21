@@ -261,7 +261,7 @@ def _cluster_speakers(
 
 
 # ---------------------------------------------------------------------------
-# Dynamic crop: per-second keyframes with instant snap + hysteresis
+# Dynamic crop: per-second keyframes with deadzone for jitter suppression
 # ---------------------------------------------------------------------------
 
 def _build_crop_keyframes(
@@ -269,54 +269,36 @@ def _build_crop_keyframes(
     src_w: int,
     src_h: int,
     target_speaker: Optional[Tuple[int, int]] = None,
-    hysteresis: bool = True,
 ) -> List[Tuple[float, int]]:
     """Build a list of (time_sec, crop_center_x) keyframes from per-frame detections.
 
-    If target_speaker is given, prefer detections near that speaker's x position.
-    Falls back to frame center when no face is detected in a frame.
-
-    When hysteresis=True (default for single-crop), small face movements are
-    suppressed — only movements > 15% of frame width emit a new keyframe.
-    This prevents jitter while keeping instant snaps for real position changes.
+    Emits one keyframe per second.  A small deadzone (3% of frame width)
+    suppresses pixel-level jitter from MediaPipe without blocking real movement.
     """
     proximity = src_w * 0.25
-    raw_positions: List[Tuple[float, int]] = []
+    deadzone = int(src_w * 0.03)  # ~38px on 1280w — just noise suppression
+    keyframes: List[Tuple[float, int]] = []
+    held_x: Optional[int] = None
 
     for t, dets in enumerate(per_frame_dets):
         if dets and target_speaker:
             best = min(dets, key=lambda d: abs(d[0] - target_speaker[0]))
             if abs(best[0] - target_speaker[0]) < proximity:
-                raw_positions.append((float(t), best[0]))
+                raw_x = best[0]
             else:
-                raw_positions.append((float(t), target_speaker[0]))
+                raw_x = target_speaker[0]
         elif dets:
             biggest = max(dets, key=lambda d: d[2])
-            raw_positions.append((float(t), biggest[0]))
+            raw_x = biggest[0]
         else:
-            if raw_positions:
-                raw_positions.append((float(t), raw_positions[-1][1]))
-            else:
-                raw_positions.append((float(t), src_w // 2))
+            raw_x = held_x if held_x is not None else src_w // 2
 
-    if not hysteresis:
-        return raw_positions
-
-    # Hysteresis pass: only emit a keyframe when face moves significantly
-    threshold = int(src_w * 0.15)
-    keyframes: List[Tuple[float, int]] = []
-    held_x = raw_positions[0][1] if raw_positions else src_w // 2
-
-    for t, cx in raw_positions:
-        if abs(cx - held_x) > threshold:
-            held_x = cx
-            keyframes.append((t, cx))
-        elif not keyframes:
-            keyframes.append((t, held_x))
-
-    # Ensure we have at least the first position
-    if not keyframes and raw_positions:
-        keyframes.append(raw_positions[0])
+        # Deadzone: if face barely moved, hold position to avoid jitter
+        if held_x is not None and abs(raw_x - held_x) < deadzone:
+            keyframes.append((float(t), held_x))
+        else:
+            held_x = raw_x
+            keyframes.append((float(t), raw_x))
 
     return keyframes
 
@@ -552,7 +534,7 @@ def _hybrid_reframe(
     if len(segments) == 1:
         mode = segments[0][0]
         if mode == "single":
-            kf = _build_crop_keyframes(per_frame_dets, src_w, src_h, hysteresis=True)
+            kf = _build_crop_keyframes(per_frame_dets, src_w, src_h)
             return _dynamic_single_crop(in_path, out_path, kf, src_w, src_h, ar)
         else:
             return _dynamic_split_screen(in_path, out_path, per_frame_dets, speakers, src_w, src_h, ar)
@@ -579,14 +561,14 @@ def _hybrid_reframe(
 
             if mode == "single":
                 # Track the biggest face each frame — no target speaker lock
-                kf = _build_crop_keyframes(seg_dets, src_w, src_h, hysteresis=True)
+                kf = _build_crop_keyframes(seg_dets, src_w, src_h)
                 _dynamic_single_crop(seg_cut, seg_framed, kf, src_w, src_h, ar)
             else:
                 # Re-cluster within this segment's frames for accurate panels
                 seg_speakers = _cluster_speakers(seg_dets, src_w)
                 if len(seg_speakers) < 2:
                     seg_speakers = speakers[:2]  # fall back to global speakers
-                kf_dets = [_build_crop_keyframes(seg_dets, src_w, src_h, target_speaker=sp, hysteresis=False)
+                kf_dets = [_build_crop_keyframes(seg_dets, src_w, src_h, target_speaker=sp)
                            for sp in seg_speakers[:2]]
                 for kf in kf_dets:
                     _smooth_keyframes(kf)
@@ -657,7 +639,7 @@ def _smart_reframe(in_path: str, out_path: str, aspect_ratio: str) -> str:
         # Pure single-speaker tracking
         print(f"[clip/framing] 1 speaker — instant-snap tracking", flush=True)
         target = speakers[0] if speakers else None
-        kf = _build_crop_keyframes(per_frame_dets, src_w, src_h, target_speaker=target, hysteresis=True)
+        kf = _build_crop_keyframes(per_frame_dets, src_w, src_h, target_speaker=target)
         return _dynamic_single_crop(in_path, out_path, kf, src_w, src_h, ar)
     else:
         # Hybrid: switch between single-crop and split-screen within the clip
