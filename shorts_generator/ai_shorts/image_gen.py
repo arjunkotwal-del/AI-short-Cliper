@@ -1,25 +1,25 @@
-"""Image generator — DALL-E 3 scene images.
+"""Image generator — GPT Image scene images.
 
 Generates one image per scene using the image_prompt from the script.
-Downloads each image to disk for ffmpeg processing.
+Uses gpt-image-1 model with base64 output, saves to disk for ffmpeg.
 """
+import base64
 import os
-import urllib.request
 from typing import List
 
 from ..config import require_openai_key
 
-# DALL-E 3 settings
-IMAGE_MODEL = "dall-e-3"
-IMAGE_SIZE = "1024x1792"  # Vertical — native 9:16 ratio
-IMAGE_QUALITY = "standard"  # "standard" or "hd"
+# Image model settings
+IMAGE_MODEL = "gpt-image-1"
+IMAGE_SIZE = "1024x1536"  # Closest vertical ratio available (2:3)
+IMAGE_QUALITY = "low"  # "low", "medium", or "high"
 
 
 def generate_scene_images(
     scenes: List[dict],
     out_dir: str,
 ) -> List[str]:
-    """Generate one DALL-E 3 image per scene.
+    """Generate one image per scene using GPT Image model.
 
     Returns list of image file paths (PNG).
     """
@@ -40,7 +40,7 @@ def generate_scene_images(
         print(f"[image] generating scene {idx}/{len(scenes)}...", flush=True)
 
         try:
-            response = client.images.generate(
+            result = client.images.generate(
                 model=IMAGE_MODEL,
                 prompt=prompt,
                 size=IMAGE_SIZE,
@@ -48,15 +48,23 @@ def generate_scene_images(
                 n=1,
             )
 
-            image_url = response.data[0].url
-            # Download the image
-            urllib.request.urlretrieve(image_url, out_path)
+            # gpt-image-1 returns b64_json by default
+            image_data = result.data[0]
+            if hasattr(image_data, "b64_json") and image_data.b64_json:
+                img_bytes = base64.b64decode(image_data.b64_json)
+                with open(out_path, "wb") as f:
+                    f.write(img_bytes)
+            elif hasattr(image_data, "url") and image_data.url:
+                import urllib.request
+                urllib.request.urlretrieve(image_data.url, out_path)
+            else:
+                raise RuntimeError("No image data in response")
+
             image_paths.append(out_path)
             print(f"[image] scene {idx} done: {out_path}", flush=True)
 
         except Exception as e:
             print(f"[image] scene {idx} FAILED: {e}", flush=True)
-            # Create a black placeholder image so the pipeline doesn't break
             _create_placeholder(out_path)
             image_paths.append(out_path)
 
@@ -64,13 +72,13 @@ def generate_scene_images(
 
 
 def _create_placeholder(out_path: str) -> None:
-    """Create a black 1024x1792 placeholder PNG using ffmpeg."""
+    """Create a black 1024x1536 placeholder PNG using ffmpeg."""
     import shutil
     import subprocess
     ffmpeg = shutil.which("ffmpeg") or "ffmpeg"
     subprocess.run(
         [ffmpeg, "-y", "-loglevel", "error",
-         "-f", "lavfi", "-i", f"color=c=black:s=1024x1792:d=1",
+         "-f", "lavfi", "-i", "color=c=black:s=1024x1536:d=1",
          "-frames:v", "1", out_path],
         check=True, timeout=30,
     )
