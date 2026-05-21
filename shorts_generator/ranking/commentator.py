@@ -6,7 +6,7 @@ rank 1 (highest) is fully hyped.
 import os
 import subprocess
 import shutil
-from typing import Optional
+from typing import Dict, Optional
 
 from ..config import OPENAI_MODEL, require_openai_key
 
@@ -92,6 +92,41 @@ def get_audio_duration(path: str) -> float:
         capture_output=True, text=True, check=True, timeout=_TIMEOUT,
     )
     return float(r.stdout.strip())
+
+
+def generate_clip_names(title: str, total: int) -> Dict[int, str]:
+    """Use GPT to generate a 2-3 word label for each rank (rank 1 = most extreme).
+
+    Returns {rank: "short label"} dict.
+    """
+    try:
+        from openai import OpenAI
+    except ImportError:
+        return {}
+
+    client = OpenAI(api_key=require_openai_key(), timeout=60, max_retries=2)
+    prompt = f"""You label clips in a ranking video titled "{title}".
+
+Write a SHORT label (2-4 words max, ALL CAPS) for each rank from 1 to {total}.
+Rank 1 = most extreme/best moment. Rank {total} = least extreme.
+Labels must be punchy and specific, like: "TOTAL DISASTER", "CLOSE CALL", "ALMOST PERFECT"
+
+Respond ONLY with a JSON object: {{"1": "LABEL", "2": "LABEL", ..., "{total}": "LABEL"}}"""
+
+    try:
+        resp = client.chat.completions.create(
+            model=OPENAI_MODEL, temperature=0.8, max_tokens=200,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        import json, re
+        raw = (resp.choices[0].message.content or "").strip()
+        raw = re.sub(r"^```(?:json)?\s*", "", raw)
+        raw = re.sub(r"\s*```$", "", raw)
+        data = json.loads(raw)
+        return {int(k): str(v) for k, v in data.items()}
+    except Exception as e:
+        print(f"[ranking/names] label generation failed: {e}", flush=True)
+        return {}
 
 
 def create_rank_commentary(rank: int, total: int, title: str, out_dir: str) -> Optional[dict]:

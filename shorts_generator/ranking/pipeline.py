@@ -17,7 +17,7 @@ import time
 from typing import List, Optional
 
 from ..config import LOCAL_OUTPUT_DIR
-from .commentator import create_rank_commentary
+from .commentator import create_rank_commentary, generate_clip_names
 from .compositor import (
     render_ranking_overlay,
     render_title_card_png,
@@ -77,6 +77,15 @@ def generate_ranking_shorts(
         assembled: List[str] = []  # final per-clip MP4 paths in order
         shorts_meta: List[dict] = []
 
+        # ── Generate clip names (2-4 word labels for rank list) ──────────────
+        print(f"[ranking] generating clip labels...", flush=True)
+        clip_names = generate_clip_names(title, total)
+        if clip_names:
+            for r, name in sorted(clip_names.items()):
+                print(f"[ranking]   rank #{r}: {name}", flush=True)
+        else:
+            print(f"[ranking] no labels generated, rank list will show numbers only", flush=True)
+
         # ── Title card ────────────────────────────────────────────────────────
         print(f"[ranking] rendering title card for \"{title}\"", flush=True)
         title_png = os.path.join(tmp_root, "title_card.png")
@@ -104,7 +113,11 @@ def generate_ranking_shorts(
             # Step 2: Render ranking overlay PNG
             print(f"[ranking] rendering overlay (rank {rank}/{total})...", flush=True)
             overlay_png = os.path.join(clip_tmp, "overlay.png")
-            render_ranking_overlay(rank, total, out_w, out_h, overlay_png)
+            render_ranking_overlay(
+                rank, total, out_w, out_h, overlay_png,
+                clip_names=clip_names if clip_names else None,
+                title=title,
+            )
 
             # Step 3: Generate commentary + TTS
             print(f"[ranking] generating commentary TTS...", flush=True)
@@ -132,13 +145,13 @@ def generate_ranking_shorts(
                 "commentary_duration": commentary["duration"] if commentary else 0.0,
             }
             shorts_meta.append(meta)
-            print(f"[ranking] ✓ rank #{rank} done → {assembled_clip}", flush=True)
+            print(f"[ranking] rank #{rank} done -> {assembled_clip}", flush=True)
 
         # ── Concatenate all clips ─────────────────────────────────────────────
         print(f"\n[ranking] concatenating {len(assembled)} segments...", flush=True)
         final_path = os.path.join(run_dir, "ranking_final.mp4")
         concat_clips(assembled, final_path)
-        print(f"[ranking] ✓ final video → {final_path}", flush=True)
+        print(f"[ranking] final video -> {final_path}", flush=True)
 
         return {
             "title": title,

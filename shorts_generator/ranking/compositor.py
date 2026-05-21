@@ -1,45 +1,40 @@
 """Pillow overlay rendering + ffmpeg assembly for ranking clips.
 
 Responsibilities:
-  - render_ranking_overlay()  → RGBA PNG with stacked rank numbers on the left
-  - render_title_card_png()   → PNG for the intro title card
-  - make_title_card_video()   → convert PNG → short silent MP4
-  - reframe_clip()            → smart 9:16 reframe (or letterbox fallback)
-  - assemble_rank_clip()      → overlay PNG + mix TTS with audio ducking
-  - concat_clips()            → join all clips into final output
+  - render_ranking_overlay()  -> RGBA PNG: top title bar + left rank list
+  - render_title_card_png()   -> PNG for the intro title card
+  - make_title_card_video()   -> convert PNG -> short silent MP4
+  - reframe_clip()            -> smart 9:16 reframe (or letterbox fallback)
+  - assemble_rank_clip()      -> overlay PNG + mix TTS with audio ducking
+  - concat_clips()            -> join all clips into final output
 """
 import os
 import shutil
 import subprocess
 import tempfile
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 _FFMPEG = shutil.which("ffmpeg") or "ffmpeg"
 _FFPROBE = shutil.which("ffprobe") or "ffprobe"
 _TIMEOUT = 600
 
-# ── Rank colours (rank number → RGB) ─────────────────────────────────────────
-RANK_COLORS: dict = {
-    1: (255, 60, 60),      # red
-    2: (74, 144, 217),     # blue
-    3: (255, 215, 0),      # gold/yellow
-    4: (160, 160, 160),    # gray
-    5: (230, 230, 230),    # white
-}
-
-# Fall back for ranks 6+ (unusual but handle gracefully)
-_EXTRA_COLORS = [
-    (180, 120, 255),   # purple
-    (80, 220, 120),    # green
-    (255, 140, 0),     # orange
+# ── Rank colours matching reference image ─────────────────────────────────────
+# rank 1 = gold/warm (best), descending to green (least extreme)
+_RANK_PALETTE = [
+    (255, 215,   0),  # rank 1 — gold
+    (255,  80,  50),  # rank 2 — red-orange
+    (255, 155,   0),  # rank 3 — orange
+    (120, 220,  50),  # rank 4 — lime
+    ( 60, 185,  80),  # rank 5 — green
+    ( 30, 155, 110),  # rank 6 — teal-green
+    (180, 120, 255),  # rank 7 — purple (fallback)
+    ( 80, 200, 200),  # rank 8 — cyan  (fallback)
 ]
 
 
 def _rank_color(rank: int) -> Tuple[int, int, int]:
-    if rank in RANK_COLORS:
-        return RANK_COLORS[rank]
-    idx = (rank - 6) % len(_EXTRA_COLORS)
-    return _EXTRA_COLORS[idx]
+    idx = max(0, rank - 1)
+    return _RANK_PALETTE[idx % len(_RANK_PALETTE)]
 
 
 # ── Font helper ───────────────────────────────────────────────────────────────
@@ -52,11 +47,30 @@ def _get_font(size: int):
             return ImageFont.truetype(name, size)
         except Exception:
             pass
-    # Last resort: PIL's built-in bitmap font (tiny but always available)
     try:
         return ImageFont.load_default(size=size)
     except Exception:
         return ImageFont.load_default()
+
+
+def _text_size(font, text: str) -> Tuple[int, int]:
+    """Return (width, height) of rendered text."""
+    try:
+        bb = font.getbbox(text)
+        return bb[2] - bb[0], bb[3] - bb[1]
+    except Exception:
+        return len(text) * (font.size if hasattr(font, "size") else 12), 20
+
+
+def _draw_outlined(draw, xy, text, font, fill, outline=(0, 0, 0), stroke=3):
+    """Draw text with a solid outline (for readability over video)."""
+    x, y = xy
+    for dx in range(-stroke, stroke + 1):
+        for dy in range(-stroke, stroke + 1):
+            if dx != 0 or dy != 0:
+                draw.text((x + dx, y + dy), text, font=font,
+                          fill=(*outline, fill[3] if len(fill) == 4 else 255))
+    draw.text((x, y), text, font=font, fill=fill)
 
 
 # ── Ranking overlay PNG ───────────────────────────────────────────────────────
@@ -67,92 +81,115 @@ def render_ranking_overlay(
     width: int,
     height: int,
     out_path: str,
+    clip_names: Optional[Dict[int, str]] = None,   # {rank: "short label"}
+    title: Optional[str] = None,
 ) -> str:
-    """Render a transparent RGBA PNG with stacked rank numbers on the left.
+    """Render a transparent RGBA overlay matching the reference design:
 
-    Current rank: full color, large, glowing.
-    Other ranks: same color at 35% opacity, smaller.
+    - Top black bar with coloured title text
+    - Left-aligned rank list: [coloured number] [white label]
+    - Current rank: larger text, full opacity
+    - Other ranks: smaller, 65% opacity
     """
-    from PIL import Image, ImageDraw, ImageFilter
+    from PIL import Image, ImageDraw
 
     img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
 
-    # Background strip (semi-transparent dark)
-    strip_w = max(110, int(width * 0.155))
-    bg = Image.new("RGBA", (strip_w, height), (0, 0, 0, 0))
-    bg_draw = ImageDraw.Draw(bg)
-    bg_draw.rectangle([0, 0, strip_w - 1, height - 1], fill=(0, 0, 0, 170))
-    img.alpha_composite(bg, (0, 0))
+    # ── Top title bar ─────────────────────────────────────────────────────────
+    bar_h = int(height * 0.145)
+    draw.rectangle([0, 0, width, bar_h], fill=(0, 0, 0, 220))
 
-    # Distribute ranks top→bottom (highest rank number first, e.g. 5→4→3→2→1)
-    ranks_top_to_bottom = list(range(total_ranks, 0, -1))
+    if title:
+        words = title.upper().split()
+        title_font_size = max(44, int(height * 0.040))
+        font = _get_font(title_font_size)
 
-    usable_h = int(height * 0.90)
-    top_pad = int(height * 0.05)
-    spacing = usable_h / total_ranks
+        # "RANKING" = lime, rest = white (all caps, Impact)
+        LIME = (100, 255, 80, 255)
+        WHITE = (255, 255, 255, 255)
+        word_colors = [LIME if i == 0 else WHITE for i in range(len(words))]
 
-    for i, rank in enumerate(ranks_top_to_bottom):
-        cy = int(top_pad + spacing * i + spacing / 2)
-        cx = strip_w // 2
+        # Wrap words into lines that fit within bar width (90% of frame)
+        max_w = int(width * 0.90)
+        lines: List[List[Tuple[str, tuple]]] = []
+        current_line: List[Tuple[str, tuple]] = []
+        current_w = 0
+        gap = int(title_font_size * 0.28)  # gap between words
+
+        for word, color in zip(words, word_colors):
+            ww, _ = _text_size(font, word)
+            needed = ww + (gap if current_line else 0)
+            if current_line and current_w + needed > max_w:
+                lines.append(current_line)
+                current_line = [(word, color)]
+                current_w = ww
+            else:
+                current_line.append((word, color))
+                current_w += needed
+
+        if current_line:
+            lines.append(current_line)
+
+        # Measure total text block height and center vertically in bar
+        line_h = int(title_font_size * 1.20)
+        total_text_h = len(lines) * line_h
+        y0 = (bar_h - total_text_h) // 2
+
+        for li, line_words in enumerate(lines):
+            # Measure line total width
+            line_w = sum(_text_size(font, w)[0] for w, _ in line_words) + gap * (len(line_words) - 1)
+            x = (width - line_w) // 2
+            ly = y0 + li * line_h
+            for word, color in line_words:
+                ww, _ = _text_size(font, word)
+                _draw_outlined(draw, (x, ly), word, font, color, stroke=3)
+                x += ww + gap
+
+    # ── Rank list (left side, below title bar) ────────────────────────────────
+    list_top = bar_h + int(height * 0.035)
+    list_bottom = int(height * 0.97)
+    list_h = list_bottom - list_top
+    item_h = list_h / total_ranks
+
+    left_x = int(width * 0.030)  # left margin
+
+    for i in range(total_ranks):
+        rank = i + 1  # rank 1 at top, rank N at bottom
         is_current = (rank == current_rank)
+
         color = _rank_color(rank)
+        alpha = 255 if is_current else 165   # 65% for non-current
 
-        if is_current:
-            # ── Active rank: large + glow ──────────────────────────────────
-            font_size = max(88, int(height * 0.075))
-            font = _get_font(font_size)
+        num_size  = max(52, int(height * (0.060 if is_current else 0.048)))
+        label_size = max(32, int(height * (0.036 if is_current else 0.029)))
 
-            # Glow layer: draw text in color on a transparent layer, blur it
-            glow_layer = Image.new("RGBA", (strip_w, height), (0, 0, 0, 0))
-            gd = ImageDraw.Draw(glow_layer)
-            text = str(rank)
-            # getbbox returns (left, top, right, bottom) relative to the anchor
-            try:
-                bbox = font.getbbox(text)
-                tw = bbox[2] - bbox[0]
-                th = bbox[3] - bbox[1]
-            except Exception:
-                tw, th = font_size, font_size
-            tx = cx - tw // 2
-            ty = cy - th // 2
-            # Draw glow copies
-            for dx in range(-10, 11, 5):
-                for dy in range(-10, 11, 5):
-                    gd.text((tx + dx, ty + dy), text, font=font,
-                             fill=(*color, 80))
-            blurred = glow_layer.filter(ImageFilter.GaussianBlur(radius=12))
-            img.alpha_composite(blurred, (0, 0))
+        num_font   = _get_font(num_size)
+        label_font = _get_font(label_size)
 
-            # Sharp text on top
-            sharp = Image.new("RGBA", (strip_w, height), (0, 0, 0, 0))
-            sd = ImageDraw.Draw(sharp)
-            sd.text((tx, ty), text, font=font, fill=(*color, 255))
-            img.alpha_composite(sharp, (0, 0))
+        y_center = int(list_top + item_h * i + item_h / 2)
 
-        else:
-            # ── Inactive rank: small, dim ──────────────────────────────────
-            font_size = max(54, int(height * 0.047))
-            font = _get_font(font_size)
-            text = str(rank)
-            try:
-                bbox = font.getbbox(text)
-                tw = bbox[2] - bbox[0]
-                th = bbox[3] - bbox[1]
-            except Exception:
-                tw, th = font_size, font_size
-            tx = cx - tw // 2
-            ty = cy - th // 2
+        # Draw rank number
+        num_text = str(rank)
+        nw, nh = _text_size(num_font, num_text)
+        ny = y_center - nh // 2
+        _draw_outlined(draw, (left_x, ny), num_text, num_font,
+                       (*color, alpha), stroke=4)
 
-            dim = Image.new("RGBA", (strip_w, height), (0, 0, 0, 0))
-            dd = ImageDraw.Draw(dim)
-            dd.text((tx, ty), text, font=font, fill=(*color, 90))  # ~35% alpha
-            img.alpha_composite(dim, (0, 0))
+        # Draw label next to number (if provided)
+        label = (clip_names or {}).get(rank, "")
+        if label:
+            lw, lh = _text_size(label_font, label)
+            lx = left_x + nw + int(width * 0.018)
+            ly = y_center - lh // 2
+            _draw_outlined(draw, (lx, ly), label.upper(), label_font,
+                           (255, 255, 255, alpha), stroke=3)
 
     img.save(out_path, "PNG")
     return out_path
 
 
-# ── Title card ────────────────────────────────────────────────────────────────
+# ── Title card (intro) ────────────────────────────────────────────────────────
 
 def render_title_card_png(
     title: str,
@@ -160,61 +197,56 @@ def render_title_card_png(
     height: int,
     out_path: str,
 ) -> str:
-    """Render a title card PNG: dark background, bold colored title text."""
+    """Render intro title card: black BG, lime 'RANKING' + white topic text."""
     from PIL import Image, ImageDraw
 
-    img = Image.new("RGB", (width, height), (10, 10, 10))
+    img = Image.new("RGB", (width, height), (8, 8, 8))
     draw = ImageDraw.Draw(img)
 
-    # "RANKING" header — white, smaller
-    header_size = max(60, int(height * 0.052))
-    header_font = _get_font(header_size)
-    header_text = "RANKING"
-    try:
-        hb = header_font.getbbox(header_text)
-        hw = hb[2] - hb[0]
-    except Exception:
-        hw = header_size * len(header_text) // 2
-    draw.text(((width - hw) // 2, int(height * 0.28)), header_text,
-              font=header_font, fill=(220, 220, 220))
+    words = title.upper().split()
+    font_size = max(72, int(height * 0.065))
+    font = _get_font(font_size)
 
-    # Main title — split across two lines if needed, gold color
-    title_size = max(72, int(height * 0.062))
-    title_font = _get_font(title_size)
-    words = title.split()
-    lines: List[str] = []
-    current = ""
-    for w in words:
-        test = (current + " " + w).strip()
-        try:
-            tb = title_font.getbbox(test)
-            tw = tb[2] - tb[0]
-        except Exception:
-            tw = title_size * len(test) // 2
-        if tw > width * 0.85 and current:
-            lines.append(current)
-            current = w
+    LIME  = (100, 255, 80)
+    WHITE = (255, 255, 255)
+    word_colors = [LIME if i == 0 else WHITE for i in range(len(words))]
+
+    # Wrap into lines
+    max_w = int(width * 0.88)
+    gap = int(font_size * 0.28)
+    lines: List[List[Tuple[str, tuple]]] = []
+    cur_line: List[Tuple[str, tuple]] = []
+    cur_w = 0
+
+    for word, color in zip(words, word_colors):
+        ww, _ = _text_size(font, word)
+        needed = ww + (gap if cur_line else 0)
+        if cur_line and cur_w + needed > max_w:
+            lines.append(cur_line)
+            cur_line = [(word, color)]
+            cur_w = ww
         else:
-            current = test
-    if current:
-        lines.append(current)
+            cur_line.append((word, color))
+            cur_w += needed
+    if cur_line:
+        lines.append(cur_line)
 
-    total_text_h = len(lines) * int(title_size * 1.25)
-    y_start = int(height * 0.44) - total_text_h // 2
+    line_h = int(font_size * 1.25)
+    total_h = len(lines) * line_h
+    y0 = height // 2 - total_h // 2 - int(height * 0.05)
 
-    for li, line in enumerate(lines):
-        try:
-            lb = title_font.getbbox(line)
-            lw = lb[2] - lb[0]
-        except Exception:
-            lw = title_size * len(line) // 2
+    for li, line_words in enumerate(lines):
+        lw = sum(_text_size(font, w)[0] for w, _ in line_words) + gap * (len(line_words) - 1)
         x = (width - lw) // 2
-        y = y_start + li * int(title_size * 1.25)
-        draw.text((x, y), line, font=title_font, fill=(255, 215, 0))  # gold
+        ly = y0 + li * line_h
+        for word, color in line_words:
+            ww, _ = _text_size(font, word)
+            _draw_outlined(draw, (x, ly), word, font, (*color, 255), stroke=4)
+            x += ww + gap
 
-    # Trophy emoji stand-in: draw a small decorative line
-    accent_y = int(height * 0.73)
-    draw.rectangle([width // 2 - 60, accent_y, width // 2 + 60, accent_y + 4],
+    # Gold accent line below title
+    accent_y = y0 + total_h + int(height * 0.04)
+    draw.rectangle([width // 2 - 80, accent_y, width // 2 + 80, accent_y + 5],
                    fill=(255, 215, 0))
 
     img.save(out_path, "PNG")
@@ -228,14 +260,14 @@ def make_title_card_video(
     height: int,
     out_path: str,
 ) -> str:
-    """Convert a PNG image into a short silent MP4."""
+    """Convert a PNG into a short silent MP4."""
     cmd = [
         _FFMPEG, "-y", "-loglevel", "error",
         "-loop", "1", "-i", png_path,
         "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
         "-t", f"{duration:.2f}",
         "-vf", f"scale={width}:{height}",
-        "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+        "-c:v", "libx264", "-preset", "fast", "-crf", "20", "-pix_fmt", "yuv420p",
         "-c:a", "aac", "-b:a", "128k",
         "-shortest",
         out_path,
@@ -266,46 +298,49 @@ def _probe(path: str) -> Tuple[int, int, float]:
 
 def reframe_clip(in_path: str, out_path: str, width: int, height: int,
                  letterbox: bool = False) -> str:
-    """Reframe a clip to target dimensions.
-
-    If already vertical (portrait), just scale/pad.
-    Otherwise use smart MediaPipe face tracking, falling back to letterbox.
-    """
+    """Reframe clip to target dimensions using smart face tracking or letterbox."""
     src_w, src_h, _ = _probe(in_path)
+    src_ratio = src_w / src_h
     target_ratio = width / height
 
-    # If source is already portrait (within 10% of target ratio), just rescale
-    src_ratio = src_w / src_h
+    # Already portrait-ish — just scale/pad
     if src_ratio <= target_ratio * 1.10 and not letterbox:
         cmd = [
             _FFMPEG, "-y", "-loglevel", "error", "-i", in_path,
-            "-vf", f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
-                   f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2",
-            "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+            "-vf", (f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+                    f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2"),
+            "-c:v", "libx264", "-preset", "fast", "-crf", "20", "-pix_fmt", "yuv420p",
             "-c:a", "aac", "-b:a", "128k", out_path,
         ]
         subprocess.run(cmd, check=True, timeout=_TIMEOUT)
         return out_path
 
     if letterbox:
-        # Simple letterbox: scale to fit, pad with black bars
         cmd = [
             _FFMPEG, "-y", "-loglevel", "error", "-i", in_path,
-            "-vf", f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
-                   f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2",
-            "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+            "-vf", (f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+                    f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2"),
+            "-c:v", "libx264", "-preset", "fast", "-crf", "20", "-pix_fmt", "yuv420p",
             "-c:a", "aac", "-b:a", "128k", out_path,
         ]
         subprocess.run(cmd, check=True, timeout=_TIMEOUT)
         return out_path
 
-    # Try smart MediaPipe reframing
+    # Smart MediaPipe reframing
     try:
         from ..local.clipper import _smart_reframe
-        aspect_ratio = f"{width}:{height}"
-        _smart_reframe(in_path, out_path, aspect_ratio)
-        # Verify output was created
+        _smart_reframe(in_path, out_path, f"{width}:{height}")
         if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+            # Re-encode to ensure yuv420p
+            tmp = out_path + ".tmp.mp4"
+            os.rename(out_path, tmp)
+            cmd = [
+                _FFMPEG, "-y", "-loglevel", "error", "-i", tmp,
+                "-c:v", "libx264", "-preset", "fast", "-crf", "20", "-pix_fmt", "yuv420p",
+                "-c:a", "aac", "-b:a", "128k", out_path,
+            ]
+            subprocess.run(cmd, check=True, timeout=_TIMEOUT)
+            os.remove(tmp)
             return out_path
     except Exception as e:
         print(f"[ranking/reframe] smart reframe failed ({e}), using letterbox", flush=True)
@@ -313,9 +348,9 @@ def reframe_clip(in_path: str, out_path: str, width: int, height: int,
     # Letterbox fallback
     cmd = [
         _FFMPEG, "-y", "-loglevel", "error", "-i", in_path,
-        "-vf", f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
-               f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2",
-        "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+        "-vf", (f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+                f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2"),
+        "-c:v", "libx264", "-preset", "fast", "-crf", "20", "-pix_fmt", "yuv420p",
         "-c:a", "aac", "-b:a", "128k", out_path,
     ]
     subprocess.run(cmd, check=True, timeout=_TIMEOUT)
@@ -333,37 +368,28 @@ def assemble_rank_clip(
     commentary_duration: float,
     out_path: str,
 ) -> str:
-    """Overlay ranking PNG + mix TTS commentary with audio ducking.
-
-    Original clip audio ducks to 15% during commentary, returns to 100% after.
-    """
-    w, h, _ = _probe(clip_path)
-
+    """Overlay ranking PNG + mix TTS commentary with audio ducking."""
     if commentary_audio and os.path.exists(commentary_audio) and commentary_duration > 0:
         duck_expr = f"if(lt(t,{commentary_duration:.2f}),0.15,1.0)"
         filter_complex = (
-            # overlay the ranking PNG
             f"[0:v][1:v]overlay=0:0[vout];"
-            # duck original audio during commentary
             f"[0:a]volume='{duck_expr}':eval=frame[ducked];"
-            # boost commentary audio (1.8x so it's clearly audible)
             f"[2:a]volume=1.8[hook];"
             f"[ducked][hook]amix=inputs=2:duration=first:"
             f"dropout_transition=0:normalize=0[aout]"
         )
         cmd = [
             _FFMPEG, "-y", "-loglevel", "error",
-            "-i", clip_path,           # 0: video clip
-            "-i", overlay_png,         # 1: ranking overlay PNG
-            "-i", commentary_audio,    # 2: TTS commentary
+            "-i", clip_path,
+            "-i", overlay_png,
+            "-i", commentary_audio,
             "-filter_complex", filter_complex,
             "-map", "[vout]", "-map", "[aout]",
-            "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+            "-c:v", "libx264", "-preset", "fast", "-crf", "20", "-pix_fmt", "yuv420p",
             "-c:a", "aac", "-b:a", "192k",
             out_path,
         ]
     else:
-        # No commentary audio — just overlay the PNG
         filter_complex = "[0:v][1:v]overlay=0:0[vout]"
         cmd = [
             _FFMPEG, "-y", "-loglevel", "error",
@@ -371,7 +397,7 @@ def assemble_rank_clip(
             "-i", overlay_png,
             "-filter_complex", filter_complex,
             "-map", "[vout]", "-map", "0:a?",
-            "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+            "-c:v", "libx264", "-preset", "fast", "-crf", "20", "-pix_fmt", "yuv420p",
             "-c:a", "aac", "-b:a", "192k",
             out_path,
         ]
@@ -395,7 +421,7 @@ def concat_clips(clip_paths: List[str], out_path: str) -> str:
             _FFMPEG, "-y", "-loglevel", "error",
             "-f", "concat", "-safe", "0",
             "-i", concat_list,
-            "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+            "-c:v", "libx264", "-preset", "fast", "-crf", "20", "-pix_fmt", "yuv420p",
             "-c:a", "aac", "-b:a", "192k",
             out_path,
         ]

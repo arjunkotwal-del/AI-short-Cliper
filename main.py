@@ -96,7 +96,7 @@ def main() -> int:
         print(f"Output:         {result['output_path']}")
         print("=" * 72)
         for s in result["shorts"]:
-            print(f"\n  Rank #{s['rank']}  →  {s['clip_url']}")
+            print(f"\n  Rank #{s['rank']}  ->  {s['clip_url']}")
             print(f"    commentary: {s.get('commentary', '')}")
     else:
         print(f"Source video:  {result['source_video_url']}")
