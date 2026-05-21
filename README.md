@@ -96,8 +96,8 @@ python main.py URL [options]
 | `--format 360/480/720/1080` | `720` | Source download resolution |
 | `--aspect-ratio W:H` | `9:16` | Output aspect ratio |
 | `--language CODE` | auto | Force Whisper language (e.g. `en`, `es`) |
-| `--output-dir PATH` | auto | Override output directory (default: auto-detected) |
-| `--face-track` | off | Enable face-tracking smart crop (requires opencv-python) |
+| `--output-dir PATH` | `./output` | Override output directory |
+| `--remove-silence` | off | Remove silent gaps from clips (off by default) |
 | `--output-json PATH` | — | Write full result JSON to this file |
 
 ### Examples
@@ -144,12 +144,6 @@ Set in `.env` (never commit this file):
 | `LOCAL_WHISPER_MODEL` | `base` | Whisper model size (tiny/base/small/medium/large) |
 | `LOCAL_WHISPER_DEVICE` | `auto` | `auto` / `cpu` / `cuda` |
 | `LOCAL_OUTPUT_DIR` | `output` | Root folder for all output |
-
----
-
-## Unicode paths
-
-If your project lives under a folder with non-ASCII characters (e.g. Windows OneDrive `Документы`), the output directory automatically defaults to `~/shorts-output` to avoid ffmpeg issues. You can override this with `--output-dir` or `LOCAL_OUTPUT_DIR` in `.env`.
 
 ---
 

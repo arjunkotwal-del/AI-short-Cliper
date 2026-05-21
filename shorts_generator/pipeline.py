@@ -23,7 +23,7 @@ def generate_shorts(
     language: Optional[str] = None,
     min_score: int = 0,
     output_dir: Optional[str] = None,
-    face_track: bool = False,
+    remove_silence: bool = False,
 ) -> Dict:
     """Run the full local pipeline and return a structured result.
 
@@ -138,7 +138,7 @@ def generate_shorts(
         aspect_ratio=aspect_ratio,
         words=words or None,
         out_dir=video_out_dir,
-        face_track=face_track,
+        remove_silence=remove_silence,
     )
 
     # 8. Generate social copy (.txt sidecar) for each successful clip

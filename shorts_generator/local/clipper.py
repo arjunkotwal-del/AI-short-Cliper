@@ -386,33 +386,6 @@ def _escape_ass(text: str) -> str:
     return text.replace("\\", "\\\\").replace("{", "\\{").replace("}", "\\}").replace("\n", "\\N")
 
 
-_PROFANITY_MAP = {
-    "fuck": "f**k", "fucked": "f**ked", "fucking": "f**king", "fucker": "f**ker",
-    "shit": "s**t", "shitting": "s**tting", "shitty": "s**tty",
-    "ass": "a**", "asshole": "a**hole",
-    "bitch": "b**ch", "bitches": "b**ches",
-    "damn": "d**n", "damned": "d**ned",
-    "dick": "d**k", "cock": "c**k", "pussy": "p***y",
-    "nigga": "n***a", "nigger": "n****r",
-    "cunt": "c**t", "whore": "w***e",
-}
-
-
-def _censor_hook(text: str) -> str:
-    """Replace profane words with bleeped versions, preserving original casing."""
-    import re
-    def _replace(match):
-        word = match.group(0)
-        replacement = _PROFANITY_MAP.get(word.lower(), word)
-        # preserve original casing
-        if word.isupper():
-            return replacement.upper()
-        if word[0].isupper():
-            return replacement[0].upper() + replacement[1:]
-        return replacement
-    pattern = re.compile(r"\b(" + "|".join(re.escape(w) for w in _PROFANITY_MAP) + r")\b", re.IGNORECASE)
-    return pattern.sub(_replace, text)
-
 
 def _generate_ass(
     words: List[Dict],
@@ -470,7 +443,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
     # Hook overlay: top-center for first 2.5 seconds
     if hook_sentence:
-        safe_hook = _escape_ass(_censor_hook(hook_sentence).upper())
+        safe_hook = _escape_ass(hook_sentence.upper())
         events.append(
             f"Dialogue: 1,{_fmt_ass_time(0)},{_fmt_ass_time(2.5)},"
             f"Hook,,0,0,0,,{{\\an8\\fscx90\\fscy90\\t(0,200,\\fscx100\\fscy100)}}{safe_hook}"
@@ -657,30 +630,6 @@ def _extract_thumbnail(clip_path: str, thumb_path: str, at_pct: float = 0.25) ->
 # Public interface
 # ---------------------------------------------------------------------------
 
-def _smart_reframe(in_path: str, out_path: str, aspect_ratio: str) -> str:
-    """Face-aware reframing: detect faces → crop/split-screen, or letterbox fallback."""
-    try:
-        w, h, fps = _probe_video(in_path)
-        frames = _sample_frames(in_path, n_samples=20)
-        detections = _detect_faces_in_frames(frames)
-        speakers = _cluster_speakers(detections, w, max_speakers=4)
-
-        if len(speakers) == 1:
-            print("[clip/framing] single speaker -> center crop", flush=True)
-            _single_crop_ffmpeg(in_path, out_path, speakers[0], w, h, aspect_ratio)
-            return out_path
-        elif len(speakers) >= 2:
-            print(f"[clip/framing] {len(speakers)} speakers -> split-screen", flush=True)
-            _split_screen_ffmpeg(in_path, out_path, speakers, w, h, aspect_ratio)
-            return out_path
-    except Exception as e:
-        print(f"[clip/framing] face detection failed ({e}), using letterbox", flush=True)
-
-    # Fallback: letterbox
-    _reframe_vertical(in_path, out_path, aspect_ratio)
-    return out_path
-
-
 def crop_clip_local(
     source_path: str,
     start_time: float,
@@ -689,9 +638,9 @@ def crop_clip_local(
     out_path: str,
     words: Optional[List[Dict]] = None,
     hook_sentence: Optional[str] = None,
-    face_track: bool = False,
+    remove_silence: bool = False,
 ) -> str:
-    """Cut + smart-reframe + (optionally) burn captions for one highlight."""
+    """Cut + letterbox reframe + (optionally) burn captions for one highlight."""
     cut_path = out_path + ".cut.mp4"
     dejumped_path = out_path + ".dejumped.mp4"
     framed_path = out_path + ".framed.mp4"
@@ -701,11 +650,11 @@ def crop_clip_local(
 
     try:
         _cut_subclip(source_path, start_time, end_time, cut_path)
-        _remove_silence(cut_path, dejumped_path)
-        if face_track:
-            _smart_reframe(dejumped_path, framed_path, aspect_ratio)
+        if remove_silence:
+            _remove_silence(cut_path, dejumped_path)
         else:
-            _reframe_vertical(dejumped_path, framed_path, aspect_ratio)
+            shutil.copy2(cut_path, dejumped_path)
+        _reframe_vertical(dejumped_path, framed_path, aspect_ratio)
 
         captioned = False
         if words or hook_sentence:
@@ -772,7 +721,7 @@ def crop_highlights_local(
     aspect_ratio: str = "9:16",
     out_dir: Optional[str] = None,
     words: Optional[List[Dict]] = None,
-    face_track: bool = False,
+    remove_silence: bool = False,
 ) -> List[Dict]:
     out_dir = out_dir or LOCAL_OUTPUT_DIR
     os.makedirs(out_dir, exist_ok=True)
@@ -790,7 +739,7 @@ def crop_highlights_local(
                 out_path,
                 words=words,
                 hook_sentence=h.get("hook_sentence"),
-                face_track=face_track,
+                remove_silence=remove_silence,
             )
             thumb_path = os.path.splitext(out_path)[0] + ".jpg"
             _extract_thumbnail(out_path, thumb_path)

@@ -10,22 +10,7 @@ LOCAL_WHISPER_MODEL = os.getenv("LOCAL_WHISPER_MODEL", "base")
 LOCAL_WHISPER_DEVICE = os.getenv("LOCAL_WHISPER_DEVICE", "auto")  # auto, cpu, or cuda
 
 
-def _default_output_dir() -> str:
-    """Pick a safe default output directory.
-
-    If the project lives under a path with non-ASCII characters (e.g. Windows
-    OneDrive "Документы"), ffmpeg and some tools can choke on it.  Fall back to
-    ~/shorts-output which is always ASCII-safe.
-    """
-    cwd = os.getcwd()
-    try:
-        cwd.encode("ascii")
-        return os.path.join(cwd, "output")
-    except UnicodeEncodeError:
-        return os.path.join(os.path.expanduser("~"), "shorts-output")
-
-
-LOCAL_OUTPUT_DIR = os.getenv("LOCAL_OUTPUT_DIR") or _default_output_dir()
+LOCAL_OUTPUT_DIR = os.getenv("LOCAL_OUTPUT_DIR", "output")
 
 
 def require_openai_key() -> str:

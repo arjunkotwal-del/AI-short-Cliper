@@ -20,9 +20,13 @@ def main() -> int:
                         help="Source resolution (default: 720)")
     parser.add_argument("--language", default=None, help="Force Whisper language code e.g. 'en' (default: auto)")
     parser.add_argument("--output-json", default=None, help="Write full result JSON to this path")
-    parser.add_argument("--output-dir", default=None, help="Override output directory (default: from .env or ~/shorts-output)")
-    parser.add_argument("--face-track", action="store_true", help="Enable face-tracking crop (requires opencv-python)")
+    parser.add_argument("--output-dir", default=None, help="Override output directory (default: from .env or ./output)")
+    parser.add_argument("--face-track", action="store_true", help="(Not yet implemented) Enable face-tracking crop")
+    parser.add_argument("--remove-silence", action="store_true", help="Remove silent gaps from clips (off by default)")
     args = parser.parse_args()
+
+    if args.face_track:
+        print("\u26a0 --face-track is not yet implemented (Haar cascades are unreliable). Using letterbox.", flush=True)
 
     try:
         result = generate_shorts(
@@ -33,7 +37,7 @@ def main() -> int:
             language=args.language,
             min_score=args.min_score,
             output_dir=args.output_dir,
-            face_track=args.face_track,
+            remove_silence=args.remove_silence,
         )
     except Exception as e:
         print(f"\nFAILED: {e}", file=sys.stderr)

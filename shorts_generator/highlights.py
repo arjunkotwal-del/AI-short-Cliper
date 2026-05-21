@@ -78,7 +78,6 @@ Rules:
 - Duration: capture the COMPLETE story arc — start just before the hook lands, and end AFTER the payoff, reaction, or punchline finishes. If someone is building up to a reveal, opening a gift, reacting to a surprise, or landing a joke, the end_time must be AFTER that moment fully plays out and the reaction settles. Never stop at the buildup.
 - Never cut mid-sentence or mid-thought — each clip must feel complete and self-contained
 - Clips must not overlap significantly with each other
-- No two highlights may cover the same moment — each highlight must start at least 30 seconds after the previous one ends
 - {num_clips_instruction}
 - For each highlight, identify the single best "hook_sentence" — the opening line that would make someone stop scrolling. The hook_sentence MUST be clean — rephrase or pick a different line if the original contains profanity
 - Explain in one sentence why this clip is viral ("virality_reason")
@@ -185,29 +184,22 @@ def _recompute_score(h: Dict) -> Dict:
 
 
 def dedupe_highlights(highlights: List[Dict]) -> List[Dict]:
-    """Drop a highlight if it overlaps >50% or starts within 15s of a higher-scoring one."""
+    """Drop a highlight if it overlaps >50% with a higher-scoring one already kept."""
     highlights = sorted(highlights, key=lambda x: int(x.get("score", 0)), reverse=True)
     kept: List[Dict] = []
     for h in highlights:
         h_start = float(h["start_time"])
         h_end = float(h["end_time"])
         h_dur = h_end - h_start
-        skip = False
+        overlapping = False
         for k in kept:
-            k_start = float(k["start_time"])
-            k_end = float(k["end_time"])
-            # Proximity check: skip if starts within 15s of a kept clip's start
-            if abs(h_start - k_start) < 15.0:
-                skip = True
-                break
-            # Overlap check: skip if >50% overlap
-            latest_start = max(h_start, k_start)
-            earliest_end = min(h_end, k_end)
+            latest_start = max(h_start, float(k["start_time"]))
+            earliest_end = min(h_end, float(k["end_time"]))
             overlap = earliest_end - latest_start
             if overlap > 0 and overlap > 0.5 * h_dur:
-                skip = True
+                overlapping = True
                 break
-        if not skip:
+        if not overlapping:
             kept.append(h)
     return kept
 
