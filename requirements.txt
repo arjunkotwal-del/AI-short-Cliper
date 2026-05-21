@@ -1,4 +1,5 @@
 python-dotenv==1.2.2
+Pillow>=10.0.0
 yt-dlp==2026.3.17
 faster-whisper==1.2.1
 openai==2.37.0
