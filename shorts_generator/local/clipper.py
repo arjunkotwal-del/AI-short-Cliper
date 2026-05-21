@@ -261,7 +261,7 @@ def _cluster_speakers(
 
 
 # ---------------------------------------------------------------------------
-# Dynamic crop: per-second keyframes with smooth interpolation
+# Dynamic crop: per-second keyframes with instant snap + hysteresis
 # ---------------------------------------------------------------------------
 
 def _build_crop_keyframes(
@@ -269,39 +269,63 @@ def _build_crop_keyframes(
     src_w: int,
     src_h: int,
     target_speaker: Optional[Tuple[int, int]] = None,
+    hysteresis: bool = True,
 ) -> List[Tuple[float, int]]:
     """Build a list of (time_sec, crop_center_x) keyframes from per-frame detections.
 
     If target_speaker is given, prefer detections near that speaker's x position.
     Falls back to frame center when no face is detected in a frame.
+
+    When hysteresis=True (default for single-crop), small face movements are
+    suppressed — only movements > 15% of frame width emit a new keyframe.
+    This prevents jitter while keeping instant snaps for real position changes.
     """
     proximity = src_w * 0.25
-    keyframes: List[Tuple[float, int]] = []
+    raw_positions: List[Tuple[float, int]] = []
 
     for t, dets in enumerate(per_frame_dets):
         if dets and target_speaker:
-            # Pick the detection closest to the target speaker
             best = min(dets, key=lambda d: abs(d[0] - target_speaker[0]))
             if abs(best[0] - target_speaker[0]) < proximity:
-                keyframes.append((float(t), best[0]))
+                raw_positions.append((float(t), best[0]))
             else:
-                keyframes.append((float(t), target_speaker[0]))
+                raw_positions.append((float(t), target_speaker[0]))
         elif dets:
-            # No target — use the largest face
             biggest = max(dets, key=lambda d: d[2])
-            keyframes.append((float(t), biggest[0]))
+            raw_positions.append((float(t), biggest[0]))
         else:
-            # No detection — hold previous position or use center
-            if keyframes:
-                keyframes.append((float(t), keyframes[-1][1]))
+            if raw_positions:
+                raw_positions.append((float(t), raw_positions[-1][1]))
             else:
-                keyframes.append((float(t), src_w // 2))
+                raw_positions.append((float(t), src_w // 2))
+
+    if not hysteresis:
+        return raw_positions
+
+    # Hysteresis pass: only emit a keyframe when face moves significantly
+    threshold = int(src_w * 0.15)
+    keyframes: List[Tuple[float, int]] = []
+    held_x = raw_positions[0][1] if raw_positions else src_w // 2
+
+    for t, cx in raw_positions:
+        if abs(cx - held_x) > threshold:
+            held_x = cx
+            keyframes.append((t, cx))
+        elif not keyframes:
+            keyframes.append((t, held_x))
+
+    # Ensure we have at least the first position
+    if not keyframes and raw_positions:
+        keyframes.append(raw_positions[0])
 
     return keyframes
 
 
 def _smooth_keyframes(keyframes: List[Tuple[float, int]], window: int = 3) -> List[Tuple[float, int]]:
-    """Apply a rolling average to keyframe x positions for gentle panning."""
+    """Apply a rolling average to keyframe x positions for gentle panning.
+
+    Used only for split-screen panels, NOT for single-crop (which uses instant snap).
+    """
     if len(keyframes) <= 1:
         return keyframes
 
@@ -318,7 +342,7 @@ def _smooth_keyframes(keyframes: List[Tuple[float, int]], window: int = 3) -> Li
 def _build_crop_x_expr(keyframes: List[Tuple[float, int]], crop_w: int, src_w: int) -> str:
     """Build an ffmpeg expression string for the crop x position.
 
-    Linearly interpolates between keyframe positions so the crop pans smoothly.
+    Uses instant step-function snaps between keyframes (no smooth panning).
     Each keyframe is (time_sec, center_x).  The expression clamps x so the
     crop window stays within [0, src_w - crop_w].
     """
@@ -336,20 +360,13 @@ def _build_crop_x_expr(keyframes: List[Tuple[float, int]], crop_w: int, src_w: i
     def _left(cx: int) -> int:
         return max(0, min(cx - crop_w // 2, max_x))
 
-    # Build nested if(lt(t,t1), lerp(x0,x1), if(...))
-    # Working from the last segment backwards
+    # Build nested if(lt(t,t1), x0, if(lt(t,t2), x1, ...))
+    # Step function — instant snap at each keyframe time, no interpolation
     parts = str(_left(keyframes[-1][1]))
     for i in range(len(keyframes) - 2, -1, -1):
-        t0 = keyframes[i][0]
         t1 = keyframes[i + 1][0]
         x0 = _left(keyframes[i][1])
-        x1 = _left(keyframes[i + 1][1])
-        dt = t1 - t0
-        if dt < 0.01:
-            dt = 1.0
-        # Linear interpolation: x0 + (x1-x0) * (t-t0) / (t1-t0)
-        lerp = f"{x0}+({x1}-{x0})*(t-{t0:.1f})/{dt:.1f}"
-        parts = f"if(lt(t\\,{t1:.1f})\\,{lerp}\\,{parts})"
+        parts = f"if(lt(t\\,{t1:.1f})\\,{x0}\\,{parts})"
 
     return parts
 
@@ -457,12 +474,158 @@ def _dynamic_split_screen(
     return out_path
 
 
+def _classify_frames(per_frame_dets: List[List[Tuple[int, int, int]]]) -> List[str]:
+    """Label each frame as 'single' (≤1 face) or 'multi' (≥2 faces)."""
+    return ["multi" if len(d) >= 2 else "single" for d in per_frame_dets]
+
+
+def _collapse_segments(labels: List[str], min_run: int = 3) -> List[Tuple[str, int, int]]:
+    """Collapse frame labels into (mode, start_sec, end_sec) segments.
+
+    Short runs (< min_run seconds) are merged into the surrounding segment
+    to avoid flickering between layouts every second.
+    """
+    if not labels:
+        return []
+
+    # Build raw runs
+    runs: List[Tuple[str, int, int]] = []  # (mode, start, end) inclusive
+    cur_mode = labels[0]
+    cur_start = 0
+    for i in range(1, len(labels)):
+        if labels[i] != cur_mode:
+            runs.append((cur_mode, cur_start, i - 1))
+            cur_mode = labels[i]
+            cur_start = i
+    runs.append((cur_mode, cur_start, len(labels) - 1))
+
+    # Merge short runs into the previous segment
+    merged: List[Tuple[str, int, int]] = [runs[0]]
+    for mode, s, e in runs[1:]:
+        duration = e - s + 1
+        if duration < min_run:
+            # Absorb into previous segment
+            prev = merged[-1]
+            merged[-1] = (prev[0], prev[1], e)
+        else:
+            merged.append((mode, s, e))
+
+    return merged
+
+
+def _cut_segment(in_path: str, out_path: str, start: float, end: float) -> str:
+    """Cut a time range from a video with re-encoding for reliable short segments."""
+    cmd = [
+        FFMPEG, "-y", "-loglevel", "error",
+        "-ss", f"{start:.3f}",
+        "-i", in_path,
+        "-to", f"{end - start:.3f}",
+        "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+        "-c:a", "aac", "-b:a", "128k",
+        "-avoid_negative_ts", "make_zero",
+        out_path,
+    ]
+    subprocess.run(cmd, check=True, timeout=_FFMPEG_TIMEOUT)
+    return out_path
+
+
+def _hybrid_reframe(
+    in_path: str,
+    out_path: str,
+    per_frame_dets: List[List[Tuple[int, int, int]]],
+    speakers: List[Tuple[int, int]],
+    src_w: int,
+    src_h: int,
+    ar: float,
+    aspect_ratio: str,
+) -> str:
+    """Hybrid framing: switch between single-crop and split-screen within one clip.
+
+    Segments the clip by whether 1 or 2+ faces are visible in each second.
+    Short segments (<3s) are merged into neighbors to avoid flickering.
+    Each segment is rendered with the appropriate layout, then concatenated.
+    """
+    labels = _classify_frames(per_frame_dets)
+    segments = _collapse_segments(labels, min_run=3)
+
+    # If all segments are the same mode, skip segmenting
+    if len(segments) == 1:
+        mode = segments[0][0]
+        if mode == "single":
+            kf = _build_crop_keyframes(per_frame_dets, src_w, src_h, hysteresis=True)
+            return _dynamic_single_crop(in_path, out_path, kf, src_w, src_h, ar)
+        else:
+            return _dynamic_split_screen(in_path, out_path, per_frame_dets, speakers, src_w, src_h, ar)
+
+    duration = _get_video_duration(in_path)
+    tmp_dir = tempfile.mkdtemp(prefix="aishorts_hybrid_")
+    segment_files = []
+
+    try:
+        for idx, (mode, frame_start, frame_end) in enumerate(segments):
+            t_start = float(frame_start)
+            # end is inclusive, so add 1 to get the end time; clamp to duration
+            t_end = min(float(frame_end + 1), duration)
+            if t_end <= t_start:
+                continue
+
+            seg_cut = os.path.join(tmp_dir, f"seg_{idx:02d}_cut.mp4")
+            seg_framed = os.path.join(tmp_dir, f"seg_{idx:02d}.mp4")
+
+            _cut_segment(in_path, seg_cut, t_start, t_end)
+
+            # Slice the per-frame detections for this segment
+            seg_dets = per_frame_dets[frame_start:frame_end + 1]
+
+            if mode == "single":
+                # Track the biggest face each frame — no target speaker lock
+                kf = _build_crop_keyframes(seg_dets, src_w, src_h, hysteresis=True)
+                _dynamic_single_crop(seg_cut, seg_framed, kf, src_w, src_h, ar)
+            else:
+                # Re-cluster within this segment's frames for accurate panels
+                seg_speakers = _cluster_speakers(seg_dets, src_w)
+                if len(seg_speakers) < 2:
+                    seg_speakers = speakers[:2]  # fall back to global speakers
+                kf_dets = [_build_crop_keyframes(seg_dets, src_w, src_h, target_speaker=sp, hysteresis=False)
+                           for sp in seg_speakers[:2]]
+                for kf in kf_dets:
+                    _smooth_keyframes(kf)
+                _dynamic_split_screen(seg_cut, seg_framed, seg_dets, seg_speakers, src_w, src_h, ar)
+
+            segment_files.append(seg_framed)
+
+        if len(segment_files) == 1:
+            shutil.copy2(segment_files[0], out_path)
+        else:
+            # Concatenate all segments
+            concat_list = os.path.join(tmp_dir, "concat.txt")
+            with open(concat_list, "w", encoding="utf-8") as f:
+                for sf in segment_files:
+                    # ffmpeg concat demuxer needs forward slashes or escaped backslashes
+                    f.write(f"file '{sf.replace(os.sep, '/')}'\n")
+
+            cmd = [
+                FFMPEG, "-y", "-loglevel", "error",
+                "-f", "concat", "-safe", "0",
+                "-i", concat_list,
+                "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+                "-c:a", "aac", "-b:a", "128k",
+                out_path,
+            ]
+            subprocess.run(cmd, check=True, timeout=_FFMPEG_TIMEOUT)
+
+        return out_path
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
 def _smart_reframe(in_path: str, out_path: str, aspect_ratio: str) -> str:
     """Detect faces and choose the best framing strategy automatically.
 
     - 0 faces → letterbox fallback
-    - 1 speaker → smooth dynamic crop following them
-    - 2+ speakers → split-screen with per-panel tracking
+    - 1 speaker → instant-snap dynamic crop following them
+    - 2+ speakers → hybrid: switches between single-crop and split-screen
+      within the clip based on how many faces are visible each second
     """
     ar = _ratio(aspect_ratio)
     src_w, src_h, _ = _probe_video(in_path)
@@ -484,26 +647,22 @@ def _smart_reframe(in_path: str, out_path: str, aspect_ratio: str) -> str:
 
     print(f"[clip/framing] {total_faces} face detections in {frames_with_faces}/{len(frames)} frames", flush=True)
 
-    # Heuristic: if the vast majority of frames show at most 1 face,
-    # this is a single-speaker video — skip clustering and track directly.
-    multi_face_frames = sum(1 for d in per_frame_dets if len(d) >= 2)
-    single_speaker_heuristic = multi_face_frames < len(frames) * 0.25
-
     # Cluster into speaker positions
     speakers = _cluster_speakers(per_frame_dets, src_w)
 
-    if single_speaker_heuristic and len(speakers) > 1:
-        print(f"[clip/framing] heuristic override: {multi_face_frames}/{len(frames)} multi-face frames — treating as 1 speaker", flush=True)
-        speakers = speakers[:1]
+    # Classify each second as single/multi face
+    multi_face_frames = sum(1 for d in per_frame_dets if len(d) >= 2)
 
-    if len(speakers) == 1:
-        print(f"[clip/framing] 1 speaker — dynamic crop tracking", flush=True)
-        kf = _build_crop_keyframes(per_frame_dets, src_w, src_h, target_speaker=speakers[0])
-        kf = _smooth_keyframes(kf)
+    if len(speakers) <= 1 or multi_face_frames < len(frames) * 0.15:
+        # Pure single-speaker tracking
+        print(f"[clip/framing] 1 speaker — instant-snap tracking", flush=True)
+        target = speakers[0] if speakers else None
+        kf = _build_crop_keyframes(per_frame_dets, src_w, src_h, target_speaker=target, hysteresis=True)
         return _dynamic_single_crop(in_path, out_path, kf, src_w, src_h, ar)
     else:
-        print(f"[clip/framing] {len(speakers)} speakers — split-screen", flush=True)
-        return _dynamic_split_screen(in_path, out_path, per_frame_dets, speakers, src_w, src_h, ar)
+        # Hybrid: switch between single-crop and split-screen within the clip
+        print(f"[clip/framing] {len(speakers)} speakers — hybrid mode ({multi_face_frames}/{len(frames)} multi-face frames)", flush=True)
+        return _hybrid_reframe(in_path, out_path, per_frame_dets, speakers, src_w, src_h, ar, aspect_ratio)
 
 
 # ---------------------------------------------------------------------------
