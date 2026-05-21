@@ -259,19 +259,34 @@ def make_title_card_video(
     width: int,
     height: int,
     out_path: str,
+    audio_path: Optional[str] = None,
 ) -> str:
-    """Convert a PNG into a short silent MP4."""
-    cmd = [
-        _FFMPEG, "-y", "-loglevel", "error",
-        "-loop", "1", "-i", png_path,
-        "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
-        "-t", f"{duration:.2f}",
-        "-vf", f"scale={width}:{height}",
-        "-c:v", "libx264", "-preset", "fast", "-crf", "20", "-pix_fmt", "yuv420p",
-        "-c:a", "aac", "-b:a", "128k",
-        "-shortest",
-        out_path,
-    ]
+    """Convert a PNG into a short MP4, optionally with a TTS audio track."""
+    if audio_path and os.path.exists(audio_path):
+        # Mix TTS voice with silence pad so the video is exactly `duration` long
+        cmd = [
+            _FFMPEG, "-y", "-loglevel", "error",
+            "-loop", "1", "-i", png_path,
+            "-i", audio_path,
+            "-t", f"{duration:.2f}",
+            "-vf", f"scale={width}:{height}",
+            "-c:v", "libx264", "-preset", "fast", "-crf", "20", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", "192k",
+            "-shortest",
+            out_path,
+        ]
+    else:
+        cmd = [
+            _FFMPEG, "-y", "-loglevel", "error",
+            "-loop", "1", "-i", png_path,
+            "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
+            "-t", f"{duration:.2f}",
+            "-vf", f"scale={width}:{height}",
+            "-c:v", "libx264", "-preset", "fast", "-crf", "20", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", "128k",
+            "-shortest",
+            out_path,
+        ]
     subprocess.run(cmd, check=True, timeout=_TIMEOUT)
     return out_path
 
