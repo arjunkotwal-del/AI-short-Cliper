@@ -83,7 +83,7 @@ Rules:
 - Clips must not overlap significantly with each other
 - {num_clips_instruction}
 - title must be short (3-6 words), punchy, and TikTok-style — think "he didn't see that coming" or "caught lying on camera" not "The Unexpected Revelation". Lowercase, no quotes, no generic words like "shocking" or "unexpected"
-- For each highlight, identify the single best "hook_sentence" — the opening line that would make someone stop scrolling. The hook_sentence MUST be clean — rephrase or pick a different line if the original contains profanity
+- For each highlight, write a "hook_sentence" that will be spoken as a voiceover BEFORE the clip plays. It must EXPLAIN THE CONTEXT of what's happening — like you're briefing a friend who has never seen this video. Do NOT quote or repeat lines from the transcript. Instead describe the situation, the game being played, the dynamic between people, or what's at stake. 2-3 sentences max, conversational tone, no profanity. Example: instead of quoting what someone said, say "These guys are playing a game where they have to guess the celebrity from clues, and nobody can figure out who it is."
 - Explain in one sentence why this clip is viral ("virality_reason")
 - Score each dimension independently then compute the weighted final score
 
