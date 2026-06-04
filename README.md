@@ -1,42 +1,76 @@
 # AI YouTube Shorts Generator
 
-
-Automatically cut any YouTube video into viral-ready short clips. 100% free, no watermarks.  
-Give it a URL — it downloads, transcribes, scores every moment for virality, and renders polished vertical videos with animated word-level captions.
+Automatically turn any YouTube video into viral-ready vertical clips. 100% local, no watermarks, no subscriptions.
 
 ---
 
-## How it works
+## Modes
 
+### 1. `default` — Auto-clip any YouTube video
+
+Downloads, transcribes, and scores every segment for virality. Picks the best moments and crops them to 9:16 with smart speaker tracking.
+
+```bash
+python main.py "https://www.youtube.com/watch?v=VIDEO_ID"
+```
+
+**Pipeline:**
 ```
 YouTube URL
-    |
-    v
-[yt-dlp]  download source video (720p mp4, cached)
-    |
-    v
+    │
+    ▼
+[yt-dlp]          download source video (720p mp4, cached)
+    │
+    ▼
 [faster-whisper]  transcribe with word-level timestamps (cached)
-    |
-    v
-[GPT-4o-mini]  score every segment on 4 dimensions -> pick top N
-    |
-    v
-[ffmpeg]  cut + smart speaker crop (MediaPipe) + burn ASS captions
-    |
-    v
-output/{video_id}/01_title.mp4  +  .txt social copy
+    │
+    ▼
+[GPT-4o-mini]     score every segment on 8 virality signals → pick top N
+    │
+    ▼
+[MediaPipe]       detect faces per second → build crop keyframe timeline
+    │
+    ▼
+[ffmpeg]          cut + dynamic speaker crop + encode 9:16 MP4
+    │
+    ▼
+output/{video_id}/01_title.mp4
 ```
 
-### Virality scoring
+**Virality scoring:**
 
-| Dimension | Weight | What it measures |
-|-----------|--------|-----------------|
-| Hook      | 35 %   | Does the opening line stop the scroll within 3 s? |
-| Flow      | 20 %   | No mid-sentence cuts, no dead air |
-| Value     | 25 %   | Entertainment, info, or emotional payoff |
-| Trend     | 20 %   | Cultural relevance, memes, current events |
+| Signal | What it measures |
+|--------|-----------------|
+| Hook | Does the first line stop the scroll within 3 s? |
+| Emotional peak | Anger, awe, laughter, shock |
+| Opinion bomb | Controversial take that triggers replies |
+| Revelation | Surprising fact or plot twist |
+| Conflict | Confrontation or tension |
+| Quotable | Single sentence you'd screenshot |
+| Story peak | Narrative climax |
+| Practical value | Tip, hack, or advice people will save |
 
-`final score = hook*0.35 + flow*0.20 + value*0.25 + trend*0.20`
+**Smart speaker framing** (on by default): MediaPipe samples 1 frame/second, detects faces, builds a smooth crop keyframe timeline, and dynamically pans the 9:16 window to follow whoever is talking. Pass `--letterbox` to use static scale-to-fit instead.
+
+---
+
+### 2. `gaming` — Gaming highlight clips
+
+Finds the loudest, most intense moments in gaming footage by audio peak detection.
+
+```bash
+python main.py "https://www.youtube.com/watch?v=VIDEO_ID" --mode gaming --num-clips 5
+```
+
+**Pipeline:**
+```
+YouTube URL  →  [yt-dlp]  →  [ffmpeg audio analysis]  →  detect dB peaks
+    →  cut N-second clips around each peak  →  AI hook text  →  9:16 MP4s
+```
+
+- Clips are centered on each audio spike (kills, clutch moments, crowd reactions)
+- Minimum gap between peaks prevents overlapping clips
+- GPT writes a hook text label for each clip
 
 ---
 
@@ -45,7 +79,7 @@ output/{video_id}/01_title.mp4  +  .txt social copy
 | Tool | Install |
 |------|---------|
 | Python 3.9+ | [python.org](https://www.python.org/) |
-| ffmpeg | `winget install ffmpeg` / `brew install ffmpeg` / apt |
+| ffmpeg | `winget install ffmpeg` / `brew install ffmpeg` / `apt install ffmpeg` |
 | Git | for cloning |
 
 ---
@@ -65,53 +99,57 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Copy `.env.example` to `.env` and add your OpenAI key:
+Copy `.env.example` to `.env` and fill in your key:
 
-```
+```env
 OPENAI_API_KEY=sk-proj-...
+LOCAL_OUTPUT_DIR=/path/to/your/output/folder
 ```
-
----
-
-## Quick start
-
-```bash
-python main.py "https://www.youtube.com/watch?v=VIDEO_ID"
-```
-
-That produces 3 shorts (default) in `output/{video_id}/`.
 
 ---
 
 ## CLI reference
 
-```
+```bash
 python main.py URL [options]
 ```
 
 | Flag | Default | Description |
 |------|---------|-------------|
+| `--mode` | `default` | `default` or `gaming` |
 | `--num-clips N` | `3` | Max shorts to render |
-| `--min-score N` | `0` | Drop clips below this score (0 = keep all) |
+| `--min-score N` | `0` | Drop clips scoring below N (0–100) |
 | `--format 360/480/720/1080` | `720` | Source download resolution |
 | `--aspect-ratio W:H` | `9:16` | Output aspect ratio |
 | `--language CODE` | auto | Force Whisper language (e.g. `en`, `es`) |
-| `--output-dir PATH` | `./output` | Override output directory |
-| `--letterbox` | off | Disable smart speaker framing, use letterbox instead |
-| `--remove-silence` | off | Remove silent gaps from clips (off by default) |
-| `--output-json PATH` | — | Write full result JSON to this file |
+| `--letterbox` | off | Static scale-to-fit instead of smart speaker crop |
+| `--remove-silence` | off | Strip silent gaps from clips |
+| `--output-dir PATH` | from `.env` | Override output folder |
+| `--output-json PATH` | — | Dump full result metadata to JSON |
 
-### Examples
+### Gaming mode extras
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--clip-duration N` | `22` | Seconds per gaming clip |
+| `--min-gap N` | `60` | Minimum seconds between audio peaks |
+
+---
+
+## Examples
 
 ```bash
-# 5 clips from a commentary video, drop anything under 80
-python main.py "https://youtu.be/abc123" --num-clips 5 --min-score 80
+# Auto-clip a podcast — top 5 moments, drop anything under score 75
+python main.py "https://youtu.be/abc123" --num-clips 5 --min-score 75
 
-# 1080p source for higher quality
-python main.py "https://youtu.be/abc123" --format 1080 --num-clips 3
+# Gaming clips — 30s each, at least 90s apart
+python main.py "https://youtu.be/abc123" --mode gaming --clip-duration 30 --min-gap 90
 
 # Force English transcription
 python main.py "https://youtu.be/abc123" --language en
+
+# Letterbox (no face tracking) for screen recordings
+python main.py "https://youtu.be/abc123" --letterbox
 ```
 
 ---
@@ -119,18 +157,17 @@ python main.py "https://youtu.be/abc123" --language en
 ## Output structure
 
 ```
-output/
-  source_lWYcK2YBAh4.mp4              <- cached source (not re-downloaded)
-  source_lWYcK2YBAh4_transcript.json  <- cached transcript
-  lWYcK2YBAh4/
-    01_cars_a_weird_franchise.mp4     <- vertical short with captions
-    01_cars_a_weird_franchise.txt     <- TikTok/IG caption + hashtags
-    02_mater_the_reality_warper.mp4
-    02_mater_the_reality_warper.txt
+shorts-output/
+  source_{id}.mp4                  ← cached (not re-downloaded)
+  source_{id}_transcript.json      ← cached (not re-transcribed)
+  {id}/
+    01_hook_title.mp4
+    02_another_moment.mp4
+    ...
+  {id}_gaming/
+    01_watch_this_insane_clip.mp4
     ...
 ```
-
-Each `.txt` sidecar contains a punchy 150-char caption and 8 hashtags ready to paste.
 
 ---
 
@@ -140,45 +177,48 @@ Set in `.env` (never commit this file):
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `OPENAI_API_KEY` | — | **Required.** Your OpenAI key |
-| `OPENAI_MODEL` | `gpt-4o-mini` | Model for highlight scoring |
-| `LOCAL_WHISPER_MODEL` | `base` | Whisper model size (tiny/base/small/medium/large) |
+| `OPENAI_API_KEY` | — | **Required.** Your OpenAI API key |
+| `OPENAI_MODEL` | `gpt-4o-mini` | Model for virality scoring |
+| `LOCAL_WHISPER_MODEL` | `base` | Whisper model size: `tiny` / `base` / `small` / `medium` / `large-v3` |
 | `LOCAL_WHISPER_DEVICE` | `auto` | `auto` / `cpu` / `cuda` |
-| `LOCAL_OUTPUT_DIR` | `output` | Root folder for all output |
+| `LOCAL_OUTPUT_DIR` | `output` | Root folder for all generated files |
 
 ---
 
 ## GPU acceleration (faster transcription)
 
-Install PyTorch with CUDA, then use a larger Whisper model:
-
 ```bash
 pip install torch --index-url https://download.pytorch.org/whl/cu121
 ```
 
-```
-# .env
+```env
 LOCAL_WHISPER_MODEL=large-v3
 LOCAL_WHISPER_DEVICE=cuda
 ```
 
-`large-v3` on GPU runs ~10x faster than `base` on CPU and noticeably more accurate on accents and fast speech.
+`large-v3` on a GPU runs ~10× faster than `base` on CPU with noticeably better accuracy on accents and fast speech.
 
 ---
 
 ## Project structure
 
 ```
-main.py                          CLI entry point
+main.py                            CLI entry point
 shorts_generator/
-  pipeline.py                    End-to-end orchestrator
-  highlights.py                  LLM virality scoring & social copy
-  config.py                      Env-var loading
+  __init__.py                      Public API exports
+  pipeline.py                      Default mode orchestrator
+  highlights.py                    GPT virality scoring + social copy
+  config.py                        Env-var loading
   local/
-    downloader.py                yt-dlp wrapper with caching
-    transcriber.py               faster-whisper wrapper with caching
-    clipper.py                   ffmpeg cutting, letterbox, captions
-    llm.py                       OpenAI client wrapper
+    downloader.py                  yt-dlp wrapper with caching
+    transcriber.py                 faster-whisper wrapper with caching
+    clipper.py                     ffmpeg cutting, smart reframe (MediaPipe)
+    llm.py                         OpenAI client wrapper
+  gaming/
+    pipeline.py                    Gaming mode orchestrator
+    audio_peaks.py                 dB peak detection
+    narrator.py                    GPT hook text generator
+    assembler.py                   ffmpeg clip assembler
 requirements.txt
 .env.example
 ```
@@ -188,4 +228,3 @@ requirements.txt
 ## License
 
 MIT License
-

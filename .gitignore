@@ -7,3 +7,4 @@ output/
 *.mp4
 .DS_Store
 result.json
+.claude/

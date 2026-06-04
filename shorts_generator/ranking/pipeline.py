@@ -17,7 +17,13 @@ import time
 from typing import Dict, List, Optional
 
 from ..config import LOCAL_OUTPUT_DIR
-from .commentator import generate_clip_names, synthesize_tts, get_audio_duration
+from .commentator import (
+    generate_clip_names,
+    generate_clip_commentary,
+    generate_pattern_interrupt_text,
+    synthesize_tts,
+    get_audio_duration,
+)
 from .compositor import (
     render_ranking_overlay,
     render_title_card_png,
@@ -36,9 +42,14 @@ def generate_ranking_shorts(
     clip_paths: List[str],
     aspect_ratio: str = "9:16",
     output_dir: Optional[str] = None,
-    letterbox: bool = False,
+    letterbox: bool = True,
+    music_path: Optional[str] = None,
 ) -> dict:
     """Main entry point for --mode ranking.
+
+    letterbox defaults to True — user-supplied clips are shown at full frame
+    (scale-to-fit with black bars) rather than being zoomed/cropped.
+    Pass letterbox=False or --no-letterbox to enable smart face-tracking crop.
 
     clip_paths must be ordered rank-N (least extreme) to rank-1 (most extreme).
     The title string is also used as the spoken intro line.
@@ -118,20 +129,48 @@ def generate_ranking_shorts(
                 title=title,
             )
 
-            # 3c: TTS announces the rank + label (e.g. "Number 3... Playful Chaos")
-            announcement = f"Number {rank}... {label.title()}"
-            print(f"[ranking] synthesizing announcement TTS: \"{announcement}\"", flush=True)
+            # 3c: GPT writes deep analytical commentary, TTS reads it
+            # Commentary targets ~70% of clip runtime for monetization coverage.
+            reframed_dur = get_audio_duration(reframed)
+            print(f"[ranking] generating commentary for rank #{rank} ({reframed_dur:.1f}s clip)...", flush=True)
+            commentary_text = generate_clip_commentary(
+                rank, total, title, label, reframed_dur
+            )
+            print(f"[ranking]   script: {commentary_text[:80]}{'...' if len(commentary_text) > 80 else ''}", flush=True)
+
             label_mp3 = os.path.join(clip_tmp, "label_tts.mp3")
             try:
-                synthesize_tts(announcement, label_mp3)
+                synthesize_tts(commentary_text, label_mp3)
                 label_dur = get_audio_duration(label_mp3)
-                print(f"[ranking]   -> {label_dur:.1f}s", flush=True)
+                coverage = label_dur / reframed_dur * 100 if reframed_dur > 0 else 0
+                print(f"[ranking]   TTS: {label_dur:.1f}s / {reframed_dur:.1f}s ({coverage:.0f}% coverage)", flush=True)
+
+                # Hard trim: if TTS runs longer than the clip, cut it to 95% of clip
+                # duration so it ends just before the clip does.
+                if label_dur > reframed_dur:
+                    trim_to = reframed_dur * 0.95
+                    trimmed_mp3 = os.path.join(clip_tmp, "label_tts_trimmed.mp3")
+                    import subprocess as _sp, shutil as _sh
+                    _ffmpeg = _sh.which("ffmpeg") or "ffmpeg"
+                    _sp.run(
+                        [_ffmpeg, "-y", "-loglevel", "error",
+                         "-i", label_mp3, "-t", f"{trim_to:.3f}",
+                         "-c:a", "libmp3lame", "-q:a", "2", trimmed_mp3],
+                        check=True, timeout=30,
+                    )
+                    label_mp3 = trimmed_mp3
+                    label_dur = get_audio_duration(label_mp3)
+                    print(f"[ranking]   trimmed TTS to {label_dur:.1f}s to fit clip", flush=True)
             except Exception as e:
                 print(f"[ranking] TTS failed: {e}", flush=True)
                 label_mp3 = None
                 label_dur = 0.0
 
-            # 3d: Assemble
+            # 3d: Generate pattern interrupt flash text
+            flash_text = generate_pattern_interrupt_text(rank, total, title, label)
+            print(f"[ranking]   flash text: \"{flash_text}\"", flush=True)
+
+            # 3e: Assemble
             print(f"[ranking] assembling...", flush=True)
             assembled_clip = os.path.join(run_dir, f"rank{rank:02d}.mp4")
             assemble_rank_clip(
@@ -142,6 +181,8 @@ def generate_ranking_shorts(
                 commentary_audio=label_mp3,
                 commentary_duration=label_dur,
                 out_path=assembled_clip,
+                music_path=music_path,
+                flash_text=flash_text,
             )
             assembled.append(assembled_clip)
 
