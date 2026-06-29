@@ -92,7 +92,7 @@ Uses an Orchestrator Agent to interpret natural language requests and dynamicall
 - **Transcriber Agent**: Transcribes local video files.
 - **Clipper Agent**: Clips specific timestamps or extracts viral highlights.
 
-**Modes of operation:**
+#### Modes of operation
 
 * **Interactive Chat Mode**:
   Start a terminal conversation with the Orchestrator to step-by-step coordinate actions:
@@ -111,6 +111,22 @@ Uses an Orchestrator Agent to interpret natural language requests and dynamicall
   ```bash
   python web_app.py
   ```
+
+#### Advanced Capabilities
+
+* **Natural Language Configuration**:
+  The orchestrator and sub-agents parse custom settings directly from your prompt (e.g., `"extract 3 clips with min duration 15s, max duration 40s, and voiceover disabled from https://youtube.com/watch?v=VIDEO_ID"`).
+* **Local Video Support**:
+  You can bypass downloading completely by passing local file paths directly to the agent:
+  ```bash
+  # Transcribe and find viral highlights locally
+  python agentic_main.py "extract 3 highlights from C:\path\to\video.mp4 with voiceover disabled"
+
+  # Clip specific timestamps from a local file
+  python agentic_main.py "clip from 30 to 60 seconds of C:\path\to\video.mp4"
+  ```
+* **Cancellation**:
+  Running pipeline processes can be instantly stopped via the **Stop Pipeline** button on the web dashboard or by standard interrupt signals, safely halting all sub-agents and ffmpeg subprocesses.
 
 ---
 
@@ -148,17 +164,26 @@ LOCAL_OUTPUT_DIR=/path/to/your/output/folder
 
 ---
 
-## Web Dashboard
+## Flask Web Dashboard
 
-Run the interactive web dashboard to control the agentic clipping pipeline through a beautiful dark-glass UI with live terminal logs:
+You can control the agentic clipping pipeline through a Flask-based web dashboard featuring a dark-glass UI and live log streaming.
 
-```bash
-# Start the web app
-python web_app.py
-```
+### Running the Dashboard
 
-Open your browser and navigate to:
-👉 **http://localhost:5000**
+1. **Activate your virtual environment** (if not already active):
+   ```bash
+   # Windows:
+   venv\Scripts\activate
+   # macOS / Linux:
+   source venv/bin/activate
+   ```
+2. **Start the Flask server**:
+   ```bash
+   python web_app.py
+   ```
+3. **Access the interface**:
+   Open your browser and navigate to:
+   👉 **http://localhost:5000**
 
 ### Interactive Options
 - **Clips Count**: Specify the maximum number of viral shorts to render.
@@ -264,12 +289,19 @@ LOCAL_WHISPER_DEVICE=cuda
 ## Project structure
 
 ```
-main.py                            CLI entry point
+main.py                            Default/gaming CLI entry point
+agentic_main.py                    Agentic pipeline CLI / interactive entry point
+web_app.py                         Flask web dashboard server
+agent.py                           Swarm agentic loop definition
+requirements.txt                   Python dependencies
+.env.example                       Example environment configuration
+static/                            Dashboard UI static assets (HTML/CSS/JS)
 shorts_generator/
   __init__.py                      Public API exports
   pipeline.py                      Default mode orchestrator
   highlights.py                    GPT virality scoring + social copy
   config.py                        Env-var loading
+  cancel_token.py                  Pipeline cancellation state utility
   local/
     downloader.py                  yt-dlp wrapper with caching
     transcriber.py                 faster-whisper wrapper with caching
@@ -280,8 +312,6 @@ shorts_generator/
     audio_peaks.py                 dB peak detection
     narrator.py                    GPT hook text generator
     assembler.py                   ffmpeg clip assembler
-requirements.txt
-.env.example
 ```
 
 ---
