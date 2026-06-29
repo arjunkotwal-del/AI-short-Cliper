@@ -7,6 +7,7 @@ from shorts_generator.local.downloader import download_youtube_local
 from shorts_generator.local.transcriber import transcribe_local
 from shorts_generator.local.clipper import crop_clip_local, crop_highlights_local
 from shorts_generator.highlights import get_highlights, call_openai_llm
+from shorts_generator.cancel_token import check_cancelled
 
 # Pre-declare agents to allow circular references in handoffs
 orchestrator_agent = Agent("Orchestrator", "")
@@ -24,7 +25,7 @@ def download_video(url: str, format: str = "720") -> str:
     except Exception as e:
         return f"Download failed: {str(e)}"
 
-def transfer_to_orchestrator() -> Agent:
+def transfer_to_orchestrator(**kwargs) -> Agent:
     """Return control back to the orchestrator when finished downloading."""
     return orchestrator_agent
 
@@ -57,12 +58,50 @@ transcriber_agent.tools = [transcribe_video, transfer_to_orchestrator]
 transcriber_agent.tool_map = {t.__name__: t for t in transcriber_agent.tools}
 
 # ---------------------------------------------------------------------------
+def _adjust_times(start: float, end: float, min_dur: float, max_dur: float, video_dur: float):
+    dur = end - start
+    if dur < min_dur:
+        pad = min_dur - dur
+        start = max(0.0, start - pad / 2.0)
+        end = min(video_dur, start + min_dur)
+        if end == video_dur:
+            start = max(0.0, end - min_dur)
+    elif dur > max_dur:
+        end = start + max_dur
+    return round(start, 3), round(end, 3)
+
 # Clipper Tools
 # ---------------------------------------------------------------------------
-def clip_specific_times(source_path: str, start_time: float, end_time: float) -> str:
+def clip_specific_times(
+    source_path: str,
+    start_time: float,
+    end_time: float,
+    min_duration: float = 10.0,
+    max_duration: float = 60.0,
+    voiceover: bool = False,
+) -> str:
     """Clip a specific time range from a video file."""
     try:
-        out_dir = os.path.join("output", "clips")
+        check_cancelled()
+        import re
+        import json
+        filename = os.path.splitext(os.path.basename(source_path))[0]
+        match = re.search(r"source_([A-Za-z0-9_-]{11})", filename)
+        if match:
+            vid_id = match.group(1)
+        else:
+            vid_id = filename[7:] if filename.startswith("source_") else filename
+
+        cache_path = os.path.splitext(source_path)[0] + "_transcript.json"
+        video_duration = 999999.0
+        if os.path.exists(cache_path):
+            with open(cache_path, "r", encoding="utf-8") as f:
+                t = json.load(f)
+                video_duration = float(t.get("duration", 999999.0))
+
+        start_time, end_time = _adjust_times(start_time, end_time, min_duration, max_duration, video_duration)
+
+        out_dir = os.path.join("output", vid_id, "clips")
         os.makedirs(out_dir, exist_ok=True)
         out_path = os.path.join(out_dir, f"clip_{int(start_time)}_{int(end_time)}.mp4")
         
@@ -71,15 +110,23 @@ def clip_specific_times(source_path: str, start_time: float, end_time: float) ->
             start_time=start_time,
             end_time=end_time,
             aspect_ratio="9:16",
-            out_path=out_path
+            out_path=out_path,
+            voiceover=voiceover
         )
         return f"Successfully clipped! Saved to {out_path}"
     except Exception as e:
         return f"Clipping failed: {str(e)}"
 
-def extract_viral_highlights(source_path: str, num_clips: int = 3) -> str:
+def extract_viral_highlights(
+    source_path: str,
+    num_clips: int = 3,
+    min_duration: float = 10.0,
+    max_duration: float = 60.0,
+    voiceover: bool = False,
+) -> str:
     """Extract viral highlights from a video using its cached transcript."""
     try:
+        check_cancelled()
         # Load transcript from cache
         cache_path = os.path.splitext(source_path)[0] + "_transcript.json"
         if not os.path.exists(cache_path):
@@ -96,12 +143,31 @@ def extract_viral_highlights(source_path: str, num_clips: int = 3) -> str:
         if not highlights:
             return "No highlights found."
             
-        out_dir = os.path.join("output", "highlights")
+        # Sort and cap highlights to requested num_clips
+        highlights = sorted(highlights, key=lambda h: int(h.get("score", 0)), reverse=True)[:num_clips]
+            
+        import re
+        filename = os.path.splitext(os.path.basename(source_path))[0]
+        match = re.search(r"source_([A-Za-z0-9_-]{11})", filename)
+        if match:
+            vid_id = match.group(1)
+        else:
+            vid_id = filename[7:] if filename.startswith("source_") else filename
+
+        # Adjust start and end times to fit within min_duration/max_duration
+        adjusted_highlights = []
+        video_duration = float(transcript.get("duration", 999999.0))
+        for h in highlights:
+            s, e = _adjust_times(float(h["start_time"]), float(h["end_time"]), min_duration, max_duration, video_duration)
+            adjusted_highlights.append({**h, "start_time": s, "end_time": e})
+
+        out_dir = os.path.join("output", vid_id, "highlights")
         results = crop_highlights_local(
             source_path=source_path,
-            highlights=highlights,
+            highlights=adjusted_highlights,
             words=transcript.get("words"),
-            out_dir=out_dir
+            out_dir=out_dir,
+            voiceover=voiceover
         )
         
         successes = [r for r in results if r.get("clip_url")]
@@ -122,15 +188,15 @@ clipper_agent.tool_map = {t.__name__: t for t in clipper_agent.tools}
 # ---------------------------------------------------------------------------
 # Orchestrator Tools
 # ---------------------------------------------------------------------------
-def transfer_to_downloader() -> Agent:
+def transfer_to_downloader(**kwargs) -> Agent:
     """Transfer control to the Downloader Agent."""
     return downloader_agent
 
-def transfer_to_transcriber() -> Agent:
+def transfer_to_transcriber(**kwargs) -> Agent:
     """Transfer control to the Transcriber Agent."""
     return transcriber_agent
 
-def transfer_to_clipper() -> Agent:
+def transfer_to_clipper(**kwargs) -> Agent:
     """Transfer control to the Clipper Agent."""
     return clipper_agent
 

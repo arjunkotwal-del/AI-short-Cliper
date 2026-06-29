@@ -1,7 +1,14 @@
 document.addEventListener('DOMContentLoaded', () => {
     const runBtn = document.getElementById('run-btn');
+    const stopBtn = document.getElementById('stop-btn');
     const promptInput = document.getElementById('prompt-input');
     const logOutput = document.getElementById('log-output');
+    
+    // Config Inputs
+    const numClipsInput = document.getElementById('num-clips-input');
+    const minDurInput = document.getElementById('min-dur-input');
+    const maxDurInput = document.getElementById('max-dur-input');
+    const voiceoverInput = document.getElementById('voiceover-input');
     
     // Agent Cards
     const cards = {
@@ -33,6 +40,23 @@ document.addEventListener('DOMContentLoaded', () => {
         logOutput.scrollTop = logOutput.scrollHeight;
     }
 
+    function setControlsDisabled(disabled) {
+        runBtn.disabled = disabled;
+        promptInput.disabled = disabled;
+        numClipsInput.disabled = disabled;
+        minDurInput.disabled = disabled;
+        maxDurInput.disabled = disabled;
+        voiceoverInput.disabled = disabled;
+        
+        if (disabled) {
+            runBtn.textContent = 'Running...';
+            stopBtn.style.display = 'block';
+        } else {
+            runBtn.textContent = 'Run Agents';
+            stopBtn.style.display = 'none';
+        }
+    }
+
     // Connect to SSE stream
     const eventSource = new EventSource('/stream');
     
@@ -40,13 +64,21 @@ document.addEventListener('DOMContentLoaded', () => {
         const data = JSON.parse(event.data);
         if (data.text) {
             appendLog(data.text, data.agent);
+            
+            // Check for termination events
+            const textLower = data.text.toLowerCase();
+            if (
+                textLower.includes('task complete') || 
+                textLower.includes('critical error') || 
+                textLower.includes('cancelled') || 
+                textLower.includes('stopped')
+            ) {
+                setActiveAgent(null); // Turn off all pulsing
+                setControlsDisabled(false);
+            }
         }
         if (data.agent) {
             setActiveAgent(data.agent);
-        }
-        
-        if (data.text.includes('Task Complete')) {
-            setActiveAgent(null); // Turn off all pulsing
         }
     };
 
@@ -54,26 +86,51 @@ document.addEventListener('DOMContentLoaded', () => {
         const prompt = promptInput.value.trim();
         if (!prompt) return;
 
-        // Reset UI
+        const numClips = parseInt(numClipsInput.value) || 3;
+        const minDur = parseFloat(minDurInput.value) || 10;
+        const maxDur = parseFloat(maxDurInput.value) || 60;
+        const voiceover = voiceoverInput.checked;
+
+        // Reset UI and disable controls
         logOutput.innerHTML = '';
         appendLog('Initializing pipeline...', 'Orchestrator');
-        runBtn.disabled = true;
-        runBtn.textContent = 'Running...';
+        setControlsDisabled(true);
 
         try {
             const res = await fetch('/api/run', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ prompt })
+                body: JSON.stringify({
+                    prompt,
+                    num_clips: numClips,
+                    min_duration: minDur,
+                    max_duration: maxDur,
+                    voiceover: voiceover
+                })
             });
             
             if (!res.ok) throw new Error('Failed to start');
             
         } catch (err) {
             appendLog(`Error: ${err.message}`, null);
+            setControlsDisabled(false);
+        }
+    });
+
+    stopBtn.addEventListener('click', async () => {
+        stopBtn.disabled = true;
+        stopBtn.textContent = 'Stopping...';
+        try {
+            const res = await fetch('/api/stop', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' }
+            });
+            if (!res.ok) throw new Error('Failed to stop');
+        } catch (err) {
+            appendLog(`Error: ${err.message}`, null);
         } finally {
-            runBtn.disabled = false;
-            runBtn.textContent = 'Run Agents';
+            stopBtn.disabled = false;
+            stopBtn.textContent = 'Stop Pipeline';
         }
     });
     

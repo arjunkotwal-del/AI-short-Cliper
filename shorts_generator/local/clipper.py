@@ -17,6 +17,7 @@ import urllib.request
 from typing import Dict, List, Optional, Tuple
 
 from ..config import LOCAL_OUTPUT_DIR
+from ..cancel_token import check_cancelled
 
 # ---------------------------------------------------------------------------
 # Resolve ffmpeg / ffprobe at import time so PATH hijacking is caught early
@@ -995,8 +996,10 @@ def crop_clip_local(
     hook_sentence: Optional[str] = None,
     remove_silence: bool = False,
     letterbox: bool = False,
+    voiceover: bool = False,
 ) -> str:
     """Cut + smart reframe (or letterbox) + captions + TTS hook voiceover."""
+    check_cancelled()
     cut_path = out_path + ".cut.mp4"
     dejumped_path = out_path + ".dejumped.mp4"
     framed_path = out_path + ".framed.mp4"
@@ -1051,7 +1054,7 @@ def crop_clip_local(
 
         # TTS hook voiceover with audio ducking
         hook_applied = False
-        if hook_sentence:
+        if hook_sentence and voiceover:
             tts_path = _generate_hook_tts(hook_sentence, hook_mp3)
             if tts_path:
                 try:
@@ -1110,12 +1113,15 @@ def crop_highlights_local(
     words: Optional[List[Dict]] = None,
     remove_silence: bool = False,
     letterbox: bool = False,
+    voiceover: bool = False,
 ) -> List[Dict]:
+    check_cancelled()
     out_dir = out_dir or LOCAL_OUTPUT_DIR
     os.makedirs(out_dir, exist_ok=True)
     results: List[Dict] = []
     total = len(highlights)
     for i, h in enumerate(highlights, 1):
+        check_cancelled()
         out_path = os.path.join(out_dir, _slug(h.get("title", ""), i))
         print(f"[clip/local] {i}/{total}: {h.get('title', '(untitled)')}", flush=True)
         try:
@@ -1129,6 +1135,7 @@ def crop_highlights_local(
                 hook_sentence=h.get("hook_sentence"),
                 remove_silence=remove_silence,
                 letterbox=letterbox,
+                voiceover=voiceover,
             )
             thumb_path = os.path.splitext(out_path)[0] + ".jpg"
             _extract_thumbnail(out_path, thumb_path)

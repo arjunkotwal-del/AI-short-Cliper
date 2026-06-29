@@ -16,9 +16,30 @@
             <p>Live Execution Dashboard</p>
         </header>
 
-        <section class="prompt-section glass">
-            <input type="text" id="prompt-input" placeholder="e.g. clip the funniest 30 seconds of https://youtube.com/...">
-            <button id="run-btn">Run Agents</button>
+        <section class="prompt-section glass flex-column">
+            <div class="input-row">
+                <input type="text" id="prompt-input" placeholder="e.g. clip the funniest moments of https://youtube.com/...">
+                <button id="run-btn">Run Agents</button>
+                <button id="stop-btn" class="stop-btn" style="display: none;">Stop Pipeline</button>
+            </div>
+            <div class="options-row">
+                <div class="option-field">
+                    <label for="num-clips-input">Clips Count:</label>
+                    <input type="number" id="num-clips-input" value="3" min="1" max="10">
+                </div>
+                <div class="option-field">
+                    <label for="min-dur-input">Min Duration (s):</label>
+                    <input type="number" id="min-dur-input" value="10" min="5" max="120">
+                </div>
+                <div class="option-field">
+                    <label for="max-dur-input">Max Duration (s):</label>
+                    <input type="number" id="max-dur-input" value="60" min="10" max="300">
+                </div>
+                <div class="option-field checkbox-field">
+                    <input type="checkbox" id="voiceover-input">
+                    <label for="voiceover-input">Enable TTS Voiceover</label>
+                </div>
+            </div>
         </section>
 
         <section class="agents-grid">

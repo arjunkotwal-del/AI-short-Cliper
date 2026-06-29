@@ -58,18 +58,37 @@ def stream():
                 
     return Response(generate(), mimetype="text/event-stream")
 
+from shorts_generator.cancel_token import reset_cancellation, cancel_pipeline
+
 @app.route("/api/run", methods=["POST"])
 def run_pipeline():
+    reset_cancellation()
     data = request.json
     prompt = data.get("prompt")
     if not prompt:
         return jsonify({"error": "No prompt provided"}), 400
         
+    num_clips = data.get("num_clips", 3)
+    min_duration = data.get("min_duration", 10.0)
+    max_duration = data.get("max_duration", 60.0)
+    voiceover = data.get("voiceover", False)
+
+    # Instruct Orchestrator to propagate configuration settings down to tools
+    config_context = (
+        f"\n\n[USER CONFIGURATION]\n"
+        f"- Number of clips requested: {num_clips}\n"
+        f"- Minimum duration per clip: {min_duration} seconds\n"
+        f"- Maximum duration per clip: {max_duration} seconds\n"
+        f"- Enable TTS voiceover audio overlay: {voiceover}\n"
+        f"You MUST pass these parameters (`num_clips`, `min_duration`, `max_duration`, `voiceover`) "
+        f"to the Clipper tools when calling them. Do not use default values."
+    )
+
     def background_run():
         from agentic_main import orchestrator_agent
         from agent import run_agent_loop
         
-        messages = [{"role": "user", "content": prompt}]
+        messages = [{"role": "user", "content": prompt + config_context}]
         try:
             print(f"[Orchestrator] Starting task: {prompt}\n", flush=True)
             run_agent_loop(orchestrator_agent, messages)
@@ -80,6 +99,11 @@ def run_pipeline():
     # Run agent loop in a background thread so the HTTP request completes instantly
     threading.Thread(target=background_run, daemon=True).start()
     return jsonify({"status": "started"})
+
+@app.route("/api/stop", methods=["POST"])
+def stop_pipeline():
+    cancel_pipeline()
+    return jsonify({"status": "stopped"})
 
 if __name__ == "__main__":
     from shorts_generator.config import require_openai_key
