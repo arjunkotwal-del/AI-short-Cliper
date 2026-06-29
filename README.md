@@ -108,6 +108,27 @@ LOCAL_OUTPUT_DIR=/path/to/your/output/folder
 
 ---
 
+## Web Dashboard
+
+Run the interactive web dashboard to control the agentic clipping pipeline through a beautiful dark-glass UI with live terminal logs:
+
+```bash
+# Start the web app
+python web_app.py
+```
+
+Open your browser and navigate to:
+👉 **http://localhost:5000**
+
+### Interactive Options
+- **Clips Count**: Specify the maximum number of viral shorts to render.
+- **Min Duration (s)**: Set the minimum length of each clip (defaults to `10` seconds). Clips shorter than this are padded.
+- **Max Duration (s)**: Set the maximum length of each clip (defaults to `60` seconds). Clips longer than this are truncated.
+- **Enable TTS Voiceover**: Toggle to enable or disable the OpenAI Text-to-Speech audio overlay.
+- **Stop Pipeline**: Terminate a running pipeline execution instantly.
+
+---
+
 ## CLI reference
 
 ```bash
