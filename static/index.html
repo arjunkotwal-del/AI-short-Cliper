@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Agentic Shorts Dashboard</title>
+    <link rel="stylesheet" href="/style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;800&family=JetBrains+Mono&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Agentic Pipeline</h1>
+            <p>Live Execution Dashboard</p>
+        </header>
+
+        <section class="prompt-section glass">
+            <input type="text" id="prompt-input" placeholder="e.g. clip the funniest 30 seconds of https://youtube.com/...">
+            <button id="run-btn">Run Agents</button>
+        </section>
+
+        <section class="agents-grid">
+            <div class="agent-card glass" id="card-orchestrator">
+                <div class="status-indicator"></div>
+                <h2>Orchestrator</h2>
+                <p>Delegates tasks and manages workflow</p>
+            </div>
+            
+            <div class="agent-card glass" id="card-downloader">
+                <div class="status-indicator"></div>
+                <h2>Downloader</h2>
+                <p>Fetches media from YouTube</p>
+            </div>
+
+            <div class="agent-card glass" id="card-transcriber">
+                <div class="status-indicator"></div>
+                <h2>Transcriber</h2>
+                <p>Generates Whisper transcripts</p>
+            </div>
+
+            <div class="agent-card glass" id="card-clipper">
+                <div class="status-indicator"></div>
+                <h2>Clipper</h2>
+                <p>Finds highlights and renders edits</p>
+            </div>
+        </section>
+
+        <section class="terminal glass">
+            <div class="terminal-header">
+                <span class="dot red"></span>
+                <span class="dot yellow"></span>
+                <span class="dot green"></span>
+                <span class="title">Live Stream</span>
+            </div>
+            <div class="terminal-body" id="log-output">
+                <div class="log-line">Waiting for tasks to begin...</div>
+            </div>
+        </section>
+    </div>
+
+    <script src="/app.js"></script>
+</body>
+</html>

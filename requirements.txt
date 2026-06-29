@@ -8,3 +8,4 @@ mediapipe>=0.10.0
 tqdm==4.67.3
 # Uncomment for GPU (CUDA) Whisper transcription:
 # torch>=2.0
+Flask==3.0.3

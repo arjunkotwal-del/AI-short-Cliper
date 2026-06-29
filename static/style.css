@@ -1,0 +1,213 @@
+:root {
+    --bg-color: #0f172a;
+    --glass-bg: rgba(30, 41, 59, 0.7);
+    --glass-border: rgba(255, 255, 255, 0.1);
+    --primary: #3b82f6;
+    --primary-hover: #2563eb;
+    --text-main: #f8fafc;
+    --text-muted: #94a3b8;
+    --accent-glow: rgba(59, 130, 246, 0.5);
+}
+
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+body {
+    background: radial-gradient(circle at top left, #1e293b, var(--bg-color));
+    color: var(--text-main);
+    font-family: 'Inter', sans-serif;
+    min-height: 100vh;
+    padding: 2rem;
+}
+
+.container {
+    max-width: 1000px;
+    margin: 0 auto;
+    display: flex;
+    flex-direction: column;
+    gap: 2rem;
+}
+
+header h1 {
+    font-size: 2.5rem;
+    font-weight: 800;
+    background: linear-gradient(to right, #60a5fa, #c084fc);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+}
+
+header p {
+    color: var(--text-muted);
+    font-size: 1.1rem;
+    margin-top: 0.5rem;
+}
+
+.glass {
+    background: var(--glass-bg);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid var(--glass-border);
+    border-radius: 16px;
+    padding: 1.5rem;
+    box-shadow: 0 4px 30px rgba(0, 0, 0, 0.3);
+}
+
+/* Prompt Section */
+.prompt-section {
+    display: flex;
+    gap: 1rem;
+}
+
+input {
+    flex: 1;
+    background: rgba(15, 23, 42, 0.6);
+    border: 1px solid var(--glass-border);
+    border-radius: 8px;
+    padding: 1rem;
+    color: #fff;
+    font-family: 'Inter', sans-serif;
+    font-size: 1rem;
+    outline: none;
+    transition: all 0.2s;
+}
+
+input:focus {
+    border-color: var(--primary);
+    box-shadow: 0 0 15px var(--accent-glow);
+}
+
+button {
+    background: var(--primary);
+    color: #fff;
+    border: none;
+    border-radius: 8px;
+    padding: 1rem 2rem;
+    font-weight: 600;
+    font-size: 1rem;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+button:hover {
+    background: var(--primary-hover);
+    transform: translateY(-2px);
+    box-shadow: 0 4px 15px var(--accent-glow);
+}
+
+/* Agents Grid */
+.agents-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 1.5rem;
+}
+
+.agent-card {
+    position: relative;
+    transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+    overflow: hidden;
+}
+
+.agent-card h2 {
+    font-size: 1.2rem;
+    margin-bottom: 0.5rem;
+}
+
+.agent-card p {
+    font-size: 0.9rem;
+    color: var(--text-muted);
+}
+
+.status-indicator {
+    position: absolute;
+    top: 1.5rem;
+    right: 1.5rem;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: #475569;
+    transition: all 0.3s;
+}
+
+/* Active State */
+.agent-card.active {
+    border-color: var(--primary);
+    transform: translateY(-5px);
+    box-shadow: 0 10px 30px var(--accent-glow);
+}
+
+.agent-card.active .status-indicator {
+    background: #22c55e;
+    box-shadow: 0 0 10px #22c55e;
+    animation: pulse 1.5s infinite;
+}
+
+@keyframes pulse {
+    0% { transform: scale(1); opacity: 1; }
+    50% { transform: scale(1.5); opacity: 0.5; }
+    100% { transform: scale(1); opacity: 1; }
+}
+
+/* Terminal */
+.terminal {
+    padding: 0;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    height: 350px;
+}
+
+.terminal-header {
+    background: rgba(0, 0, 0, 0.3);
+    padding: 0.75rem 1rem;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    border-bottom: 1px solid var(--glass-border);
+}
+
+.dot {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+}
+.red { background: #ef4444; }
+.yellow { background: #eab308; }
+.green { background: #22c55e; }
+
+.title {
+    margin-left: auto;
+    margin-right: auto;
+    font-size: 0.85rem;
+    color: var(--text-muted);
+    font-family: 'JetBrains Mono', monospace;
+}
+
+.terminal-body {
+    padding: 1rem;
+    overflow-y: auto;
+    flex: 1;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.9rem;
+    line-height: 1.5;
+    color: #cbd5e1;
+    scroll-behavior: smooth;
+}
+
+.log-line {
+    margin-bottom: 0.25rem;
+    word-break: break-all;
+    opacity: 0;
+    animation: fadeIn 0.3s forwards;
+}
+
+.log-line.agent-Downloader { color: #60a5fa; }
+.log-line.agent-Transcriber { color: #a78bfa; }
+.log-line.agent-Clipper { color: #34d399; }
+.log-line.agent-Orchestrator { color: #fbbf24; font-weight: bold; }
+
+@keyframes fadeIn {
+    to { opacity: 1; }
+}
