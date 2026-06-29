@@ -74,6 +74,46 @@ YouTube URL  →  [yt-dlp]  →  [ffmpeg audio analysis]  →  detect dB peaks
 
 ---
 
+### 3. `agentic` — Natural language agentic pipeline
+
+Uses an Orchestrator Agent to interpret natural language requests and dynamically coordinate sub-agents:
+
+```
+                  [User Request]
+                        │
+                        ▼
+                 [Orchestrator]
+            ┌───────────┼───────────┐
+            ▼           ▼           ▼
+      [Downloader] [Transcriber] [Clipper]
+```
+
+- **Downloader Agent**: Downloads YouTube videos.
+- **Transcriber Agent**: Transcribes local video files.
+- **Clipper Agent**: Clips specific timestamps or extracts viral highlights.
+
+**Modes of operation:**
+
+* **Interactive Chat Mode**:
+  Start a terminal conversation with the Orchestrator to step-by-step coordinate actions:
+  ```bash
+  python agentic_main.py
+  ```
+
+* **Direct Prompt Execution**:
+  Pass a single command prompt directly via arguments:
+  ```bash
+  python agentic_main.py "make 3 clips for https://www.youtube.com/watch?v=VIDEO_ID"
+  ```
+
+* **Interactive Web Dashboard**:
+  Run a visual web interface to stream agent logs live and easily configure clip parameters:
+  ```bash
+  python web_app.py
+  ```
+
+---
+
 ## Prerequisites
 
 | Tool | Install |
