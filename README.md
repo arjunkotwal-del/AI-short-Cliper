@@ -83,14 +83,15 @@ Uses an Orchestrator Agent to interpret natural language requests and dynamicall
                         │
                         ▼
                  [Orchestrator]
-            ┌───────────┼───────────┐
-            ▼           ▼           ▼
-      [Downloader] [Transcriber] [Clipper]
+            ┌───────────┼───────────┬──────────────┐
+            ▼           ▼           ▼              ▼
+      [Downloader] [Transcriber] [Clipper]   [MathSolver]
 ```
 
 - **Downloader Agent**: Downloads YouTube videos.
 - **Transcriber Agent**: Transcribes local video files.
 - **Clipper Agent**: Clips specific timestamps or extracts viral highlights.
+- **MathSolver Agent**: Solves ordinary differential equations (ODEs) analytically and numerically, printing step-by-step mathematical reasoning and generating modern dark-themed plots of the solution curves.
 
 #### Modes of operation
 
@@ -127,6 +128,14 @@ Uses an Orchestrator Agent to interpret natural language requests and dynamicall
   ```
 * **Cancellation**:
   Running pipeline processes can be instantly stopped via the **Stop Pipeline** button on the web dashboard or by standard interrupt signals, safely halting all sub-agents and ffmpeg subprocesses.
+* **Mathematical Equation Solving & Plotting**:
+  The orchestrator automatically routes equation-solving prompts to the `MathSolver` agent, which generates step-by-step mathematical solutions and renders a beautiful dark-themed scientific plot of the solution curves (analytical general/particular solutions via `sympy` and numerical curves via `scipy`).
+* **Offline Mock Testing**:
+  Test the entire multi-agent pipeline and visual dashboard without OpenAI API keys by setting `MOCK_LLM=true` in your environment variables. This simulates the agent routing and executes actual Python math solvers locally to plot functions.
+  ```bash
+  # Windows Powershell
+  $env:MOCK_LLM="true"; python web_app.py
+  ```
 
 ---
 
