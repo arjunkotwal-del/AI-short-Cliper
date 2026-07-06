@@ -65,9 +65,118 @@ def function_to_schema(func: Callable) -> Dict:
     }
 
 
+def get_mock_agent_response(agent: Agent, messages: List[Any]) -> Any:
+    """Helper to mock OpenAI responses for offline testing."""
+    class MockToolCallFunction:
+        def __init__(self, name, arguments):
+            self.name = name
+            self.arguments = arguments
+
+    class MockToolCall:
+        def __init__(self, id, name, arguments):
+            self.id = id
+            self.type = "function"
+            self.function = MockToolCallFunction(name, arguments)
+
+    class MockMessage:
+        def __init__(self, content, tool_calls=None):
+            self.content = content
+            self.tool_calls = tool_calls or []
+            self.role = "assistant"
+        def model_dump(self, **kwargs):
+            return {
+                "role": "assistant",
+                "content": self.content,
+                "tool_calls": [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {
+                            "name": tc.function.name,
+                            "arguments": tc.function.arguments
+                        }
+                    } for tc in self.tool_calls
+                ] if self.tool_calls else None
+            }
+
+    # Find last user query
+    user_query = ""
+    for msg in reversed(messages):
+        if msg.get("role") == "user":
+            user_query = msg.get("content", "")
+            break
+
+    query_lower = user_query.lower()
+    
+
+    
+    if agent.name == "Orchestrator":
+        has_finished = False
+        for msg in messages:
+            if msg.get("role") == "tool" and msg.get("name") == "finish_task":
+                has_finished = True
+                break
+                
+        has_solved = False
+        for msg in messages:
+            if msg.get("role") == "tool" and msg.get("name") == "solve_differential_equation":
+                has_solved = True
+                break
+                
+        if has_finished:
+            return MockMessage(content="Successfully solved the differential equation and plotted the solution.")
+        elif has_solved:
+            sol_content = ""
+            for msg in reversed(messages):
+                if msg.get("role") == "tool" and msg.get("name") == "solve_differential_equation":
+                    sol_content = msg.get("content", "")
+                    break
+            import json
+            return MockMessage(
+                content=f"Task Complete! Here is the solution:\n\n{sol_content}",
+                tool_calls=[MockToolCall("mock_tc_4", "finish_task", json.dumps({"message": "Successfully solved the differential equation and plotted the solution."}))]
+            )
+        elif any(term in query_lower for term in ["solve", "equation", "math", "dy/dx", "y'", "y''", "ode"]):
+
+            return MockMessage(
+                content="This is a mathematical problem. Transferring to the MathSolver agent.",
+                tool_calls=[MockToolCall("mock_tc_1", "transfer_to_math_solver", "{}")]
+            )
+        else:
+            return MockMessage(
+                content="Mock Orchestrator: Please provide a mathematical equation to solve (e.g. solve dy/dx + 2y = x, y(0)=5)!"
+            )
+            
+    elif agent.name == "MathSolver":
+        has_solved = False
+        for msg in messages:
+            if msg.get("role") == "tool" and msg.get("name") == "solve_differential_equation":
+                has_solved = True
+                break
+        
+
+        if not has_solved:
+            import json
+            return MockMessage(
+                content="I will solve this differential equation using SymPy and plot it.",
+                tool_calls=[MockToolCall("mock_tc_2", "solve_differential_equation", json.dumps({"equation_description": user_query}))]
+            )
+        else:
+            return MockMessage(
+                content="I have solved the equation and saved the plot to static/math_solution.png. Task complete!",
+                tool_calls=[MockToolCall("mock_tc_3", "transfer_to_orchestrator", "{}")]
+            )
+            
+    return MockMessage(content=f"Mock response for agent {agent.name}")
+
+
 def run_agent_loop(agent: Agent, messages: List[Dict]) -> Dict:
     """Runs the agent loop until it returns a final string or switches agents."""
-    client = OpenAI(api_key=require_openai_key())
+    import os
+    mock_enabled = os.getenv("MOCK_LLM", "false").lower() == "true"
+    
+    if not mock_enabled:
+        client = OpenAI(api_key=require_openai_key())
     
     # Prepend instructions
     messages = [{"role": "system", "content": agent.instructions}] + messages
@@ -76,17 +185,20 @@ def run_agent_loop(agent: Agent, messages: List[Dict]) -> Dict:
         # Prepare tools
         tools = agent.get_tool_schemas()
         
-        kwargs = {
-            "model": OPENAI_MODEL,
-            "messages": messages,
-        }
-        if tools:
-            kwargs["tools"] = tools
-            
-        response = client.chat.completions.create(**kwargs)
-        message = response.choices[0].message
+        if mock_enabled:
+            message = get_mock_agent_response(agent, messages)
+        else:
+            kwargs = {
+                "model": OPENAI_MODEL,
+                "messages": messages,
+            }
+            if tools:
+                kwargs["tools"] = tools
+                
+            response = client.chat.completions.create(**kwargs)
+            message = response.choices[0].message
         
-        messages.append(message.model_dump(exclude_unset=True))
+        messages.append(message.model_dump(exclude_unset=True) if hasattr(message, "model_dump") else message)
         
         if not message.tool_calls:
             # Done! Agent replied with text

@@ -14,6 +14,7 @@ orchestrator_agent = Agent("Orchestrator", "")
 downloader_agent = Agent("Downloader", "")
 transcriber_agent = Agent("Transcriber", "")
 clipper_agent = Agent("Clipper", "")
+math_agent = Agent("MathSolver", "")
 
 # ---------------------------------------------------------------------------
 # Downloader Tools
@@ -186,6 +187,34 @@ clipper_agent.tools = [clip_specific_times, extract_viral_highlights, transfer_t
 clipper_agent.tool_map = {t.__name__: t for t in clipper_agent.tools}
 
 # ---------------------------------------------------------------------------
+# Math Solver Tools
+# ---------------------------------------------------------------------------
+def solve_differential_equation(equation_description: str) -> str:
+    """Solve a differential equation analytically and plot the solution.
+    Provide a clear description of the equation, variables, and any initial conditions.
+    Example: 'dy/dx = y, y(0) = 3'
+    """
+    try:
+        from shorts_generator.math_solver import run_math_solver
+        return run_math_solver(equation_description)
+    except Exception as e:
+        return f"Error running Math Solver: {str(e)}"
+
+def transfer_to_math_solver(**kwargs) -> Agent:
+    """Transfer control to the Math Solver Agent."""
+    return math_agent
+
+math_agent.instructions = (
+    "You are the Math Solver Agent. Your job is to solve mathematical equations and problems, "
+    "especially ordinary differential equations (ODEs), and generate plots of the solutions.\n"
+    "When a user asks to solve a differential equation or math problem, call solve_differential_equation(equation_description).\n"
+    "Explain the step-by-step solution to the user, and mention if a plot has been generated.\n"
+    "Once the problem is solved and the results are presented, transfer control back to the Orchestrator."
+)
+math_agent.tools = [solve_differential_equation, transfer_to_orchestrator]
+math_agent.tool_map = {t.__name__: t for t in math_agent.tools}
+
+# ---------------------------------------------------------------------------
 # Orchestrator Tools
 # ---------------------------------------------------------------------------
 def transfer_to_downloader(**kwargs) -> Agent:
@@ -211,7 +240,9 @@ orchestrator_agent.instructions = (
     "- Downloader Agent: Downloads YouTube videos. (Needs a URL).\n"
     "- Transcriber Agent: Transcribes local video files. (Needs a local file path).\n"
     "- Clipper Agent: Clips videos by specific times or finds viral highlights. (Needs a local file path).\n"
+    "- MathSolver Agent: Solves mathematical equations, especially ordinary differential equations (ODEs), and plots solutions. (Needs an equation description).\n"
     "Coordinate the workflow. If a URL is provided, send it to the Downloader first.\n"
+    "If they ask to solve a differential equation or other mathematical problems, transfer control to the MathSolver Agent.\n"
     "If they ask for viral highlights, you must ensure the video is downloaded AND transcribed before sending it to the Clipper.\n"
     "If they ask for specific timestamps (e.g. 'last 30 seconds'), transcription is optional, just download and pass to Clipper.\n"
     "When the workflow is entirely done, call finish_task to inform the user."
@@ -220,6 +251,7 @@ orchestrator_agent.tools = [
     transfer_to_downloader, 
     transfer_to_transcriber, 
     transfer_to_clipper, 
+    transfer_to_math_solver,
     finish_task
 ]
 orchestrator_agent.tool_map = {t.__name__: t for t in orchestrator_agent.tools}

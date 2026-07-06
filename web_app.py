@@ -51,6 +51,8 @@ def stream():
                     agent_name = "Transcriber"
                 elif "[clipper]" in line_lower or "[clip" in line_lower or "ffmpeg" in line_lower: 
                     agent_name = "Clipper"
+                elif "[mathsolver]" in line_lower or "math solver" in line_lower or "[mathsolver" in line_lower:
+                    agent_name = "MathSolver"
                 
                 yield f"data: {json.dumps({'text': line, 'agent': agent_name})}\n\n"
             except queue.Empty:
@@ -63,6 +65,14 @@ from shorts_generator.cancel_token import reset_cancellation, cancel_pipeline
 @app.route("/api/run", methods=["POST"])
 def run_pipeline():
     reset_cancellation()
+    # Clean up old math solution plots
+    import os
+    if os.path.exists("static/math_solution.png"):
+        try:
+            os.remove("static/math_solution.png")
+        except Exception:
+            pass
+            
     data = request.json
     prompt = data.get("prompt")
     if not prompt:

@@ -66,6 +66,12 @@
                 <h2>Clipper</h2>
                 <p>Finds highlights and renders edits</p>
             </div>
+
+            <div class="agent-card glass" id="card-mathsolver">
+                <div class="status-indicator"></div>
+                <h2>Math Solver</h2>
+                <p>Solves ODEs & plots solutions</p>
+            </div>
         </section>
 
         <section class="terminal glass">
@@ -77,6 +83,18 @@
             </div>
             <div class="terminal-body" id="log-output">
                 <div class="log-line">Waiting for tasks to begin...</div>
+            </div>
+        </section>
+
+        <section id="math-result-section" class="math-result glass" style="display: none; margin-top: 20px;">
+            <div class="terminal-header">
+                <span class="dot red"></span>
+                <span class="dot yellow"></span>
+                <span class="dot green"></span>
+                <span class="title">Solution Visualization</span>
+            </div>
+            <div class="math-result-body" style="text-align: center; padding: 20px 10px;">
+                <img id="math-plot-img" src="" alt="Solution Plot" style="max-width: 100%; height: auto; border-radius: 8px; box-shadow: 0 4px 20px rgba(0,0,0,0.6); display: none;">
             </div>
         </section>
     </div>

@@ -16,6 +16,7 @@ document.addEventListener('DOMContentLoaded', () => {
         'Downloader': document.getElementById('card-downloader'),
         'Transcriber': document.getElementById('card-transcriber'),
         'Clipper': document.getElementById('card-clipper'),
+        'MathSolver': document.getElementById('card-mathsolver'),
     };
 
     function setActiveAgent(agentName) {
@@ -75,6 +76,24 @@ document.addEventListener('DOMContentLoaded', () => {
             ) {
                 setActiveAgent(null); // Turn off all pulsing
                 setControlsDisabled(false);
+
+                // Check if a math solution plot was generated
+                const mathImg = document.getElementById('math-plot-img');
+                const mathSection = document.getElementById('math-result-section');
+                
+                // Attempt to load the image to see if it was generated/updated
+                const tempImg = new Image();
+                tempImg.onload = function() {
+                    mathImg.src = tempImg.src;
+                    mathImg.style.display = 'block';
+                    mathSection.style.display = 'block';
+                };
+                tempImg.onerror = function() {
+                    // If image doesn't exist or failed to load, hide the section
+                    mathImg.style.display = 'none';
+                    mathSection.style.display = 'none';
+                };
+                tempImg.src = '/math_solution.png?t=' + Date.now();
             }
         }
         if (data.agent) {
@@ -95,6 +114,11 @@ document.addEventListener('DOMContentLoaded', () => {
         logOutput.innerHTML = '';
         appendLog('Initializing pipeline...', 'Orchestrator');
         setControlsDisabled(true);
+
+        // Hide previous math visualization
+        document.getElementById('math-result-section').style.display = 'none';
+        document.getElementById('math-plot-img').style.display = 'none';
+        document.getElementById('math-plot-img').src = '';
 
         try {
             const res = await fetch('/api/run', {
