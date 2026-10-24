@@ -12,6 +12,7 @@ Downloads, transcribes, and scores every segment for virality. Picks the best mo
 
 ```bash
 python main.py "https://www.youtube.com/watch?v=VIDEO_ID"
+python main.py "C:\videos\podcast.mp4"      # a local file works too (skips the download)
 ```
 
 **Pipeline:**
@@ -50,7 +51,11 @@ output/{video_id}/01_title.mp4
 | Story peak | Narrative climax |
 | Practical value | Tip, hack, or advice people will save |
 
-**Smart speaker framing** (on by default): MediaPipe samples 1 frame/second, detects faces, builds a smooth crop keyframe timeline, and dynamically pans the 9:16 window to follow whoever is talking. Pass `--letterbox` to use static scale-to-fit instead.
+**Smart speaker framing** (on by default): MediaPipe samples 1 frame/second, detects faces, builds a smooth crop keyframe timeline, and dynamically pans the 9:16 window to follow whoever is talking. When faces show up in less than a quarter of the clip (animations, slides, b-roll), the full frame is fitted over a blurred copy of itself instead, so on-screen text and graphics aren't cropped off. Pass `--letterbox` to always use that fit.
+
+Black bars baked into the source video (a widescreen film inside a 16:9 upload) are detected with ffmpeg `cropdetect` and removed before framing.
+
+**Captions:** word-by-word karaoke captions sit about a quarter of the way up the frame, above the area where TikTok, Reels and Shorts draw the caption and buttons. Caption chunks never run across a sentence end or a pause. The clip's short title is shown at the top for the first 2.5 s as the hook.
 
 ---
 
@@ -131,9 +136,10 @@ Uses an Orchestrator Agent to interpret natural language requests and dynamicall
 * **Mathematical Equation Solving & Plotting**:
   The orchestrator automatically routes equation-solving prompts to the `MathSolver` agent, which generates step-by-step mathematical solutions and renders a beautiful dark-themed scientific plot of the solution curves (analytical general/particular solutions via `sympy` and numerical curves via `scipy`).
 * **Offline Mock Testing**:
-  Test the entire multi-agent pipeline and visual dashboard without OpenAI API keys by setting `MOCK_LLM=true` in your environment variables. This simulates the agent routing and executes actual Python math solvers locally to plot functions.
+  Test without an API key by setting `MOCK_LLM=true`. The default clipping pipeline gets placeholder highlights picked evenly from the transcript and placeholder captions, so download, transcription, framing and rendering all run for real. The agent dashboard simulates routing and runs the Python math solver locally.
   ```bash
   # Windows Powershell
+  $env:MOCK_LLM="true"; python main.py "C:\videos\podcast.mp4"
   $env:MOCK_LLM="true"; python web_app.py
   ```
 
@@ -143,17 +149,20 @@ Uses an Orchestrator Agent to interpret natural language requests and dynamicall
 
 | Tool | Install |
 |------|---------|
-| Python 3.9+ | [python.org](https://www.python.org/) |
-| ffmpeg | `winget install ffmpeg` / `brew install ffmpeg` / `apt install ffmpeg` |
+| Python 3.10–3.12 (tested on 3.11) | [python.org](https://www.python.org/). mediapipe and faster-whisper may not ship wheels for newer versions yet. |
+| ffmpeg 4.3+ | `winget install ffmpeg` / `brew install ffmpeg` / `apt install ffmpeg` |
+| Node.js or Deno | YouTube downloads need a JavaScript runtime for yt-dlp; without one YouTube answers HTTP 403 |
 | Git | for cloning |
+
+Keep yt-dlp current (`pip install -U "yt-dlp[default]"`). YouTube breaks releases that are a few months old.
 
 ---
 
 ## Installation
 
 ```bash
-git clone https://github.com/arjunkotwal-del/AI-short-generator.git
-cd AI-short-generator
+git clone https://github.com/arjunkotwal-del/AI-short-Cliper.git
+cd AI-short-Cliper
 
 python -m venv venv
 # Windows:
@@ -170,6 +179,19 @@ Copy `.env.example` to `.env` and fill in your key:
 OPENAI_API_KEY=sk-proj-...
 LOCAL_OUTPUT_DIR=/path/to/your/output/folder
 ```
+
+### Using Google Gemini (free tier) instead of OpenAI
+
+Any OpenAI-compatible API works through `OPENAI_BASE_URL`. For Gemini, create a key at
+[aistudio.google.com/apikey](https://aistudio.google.com/apikey) and set:
+
+```env
+OPENAI_API_KEY=your-gemini-key
+OPENAI_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai/
+OPENAI_MODEL=gemini-3.8-flash
+```
+
+The TTS voiceover option (`voiceover`) still needs a real OpenAI key.
 
 ---
 
@@ -217,7 +239,7 @@ python main.py URL [options]
 | `--format 360/480/720/1080` | `720` | Source download resolution |
 | `--aspect-ratio W:H` | `9:16` | Output aspect ratio |
 | `--language CODE` | auto | Force Whisper language (e.g. `en`, `es`) |
-| `--letterbox` | off | Static scale-to-fit instead of smart speaker crop |
+| `--letterbox` | off | Always fit the full frame over a blurred background instead of smart speaker crop |
 | `--remove-silence` | off | Strip silent gaps from clips |
 | `--output-dir PATH` | from `.env` | Override output folder |
 | `--output-json PATH` | — | Dump full result metadata to JSON |
@@ -272,8 +294,11 @@ Set in `.env` (never commit this file):
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `OPENAI_API_KEY` | — | **Required.** Your OpenAI API key |
+| `OPENAI_API_KEY` | — | **Required.** Your OpenAI (or OpenAI-compatible provider's) API key |
+| `OPENAI_BASE_URL` | OpenAI | Point at an OpenAI-compatible API, e.g. Gemini (see above) |
 | `OPENAI_MODEL` | `gpt-4o-mini` | Model for virality scoring |
+| `MOCK_LLM` | `false` | `true` = run offline with placeholder LLM answers |
+| `YTDLP_JS_RUNTIMES` | `deno,node` | JavaScript runtimes yt-dlp may use for YouTube |
 | `LOCAL_WHISPER_MODEL` | `base` | Whisper model size: `tiny` / `base` / `small` / `medium` / `large-v3` |
 | `LOCAL_WHISPER_DEVICE` | `auto` | `auto` / `cpu` / `cuda` |
 | `LOCAL_OUTPUT_DIR` | `output` | Root folder for all generated files |
@@ -322,6 +347,18 @@ shorts_generator/
     narrator.py                    GPT hook text generator
     assembler.py                   ffmpeg clip assembler
 ```
+
+---
+
+## Tests
+
+```bash
+pip install -r requirements-dev.txt
+pytest
+```
+
+The tests cover caption chunking and placement, black-bar detection, the offline mock
+and local-file input. They need ffmpeg on PATH but no API key or network.
 
 ---
 

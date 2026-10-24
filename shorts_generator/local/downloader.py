@@ -9,7 +9,7 @@ import os
 import re
 from typing import Optional
 
-from ..config import LOCAL_OUTPUT_DIR
+from ..config import LOCAL_OUTPUT_DIR, YTDLP_JS_RUNTIMES
 
 _YOUTUBE_URL_RE = re.compile(
     r"^https?://(www\.)?(youtube\.com|youtu\.be)/",
@@ -79,6 +79,7 @@ def download_youtube_local(video_url: str, fmt: str = "720", out_dir: Optional[s
         "quiet": True,
         "no_warnings": True,
         "noprogress": True,
+        "js_runtimes": {runtime: {} for runtime in YTDLP_JS_RUNTIMES},
     }
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:

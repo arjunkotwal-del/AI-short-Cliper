@@ -15,6 +15,16 @@ from .local.downloader import download_youtube_local
 from .local.transcriber import transcribe_local
 
 
+def _resolve_source(source: str, download_format: str) -> tuple:
+    """Return (local_video_path, output_folder_name) for a YouTube URL or a local video file."""
+    if os.path.isfile(source):
+        stem = os.path.splitext(os.path.basename(source))[0]
+        folder = re.sub(r"[^\w-]+", "_", stem).strip("_")[:60] or "local"
+        return os.path.abspath(source), folder
+    _m = re.search(r"(?:v=|youtu\.be/|/shorts/)([A-Za-z0-9_-]{11})", source)
+    return download_youtube_local(source, fmt=download_format), (_m.group(1) if _m else "unknown")
+
+
 def generate_shorts(
     youtube_url: str,
     num_clips: int = 3,
@@ -29,7 +39,7 @@ def generate_shorts(
     """Run the full local pipeline and return a structured result.
 
     Args:
-        youtube_url:     Source YouTube URL.
+        youtube_url:     Source YouTube URL, or the path of a local video file.
         num_clips:       Max number of shorts to render.
         aspect_ratio:    e.g. "9:16" (default).
         download_format: Source resolution — "360" / "480" / "720" / "1080".
@@ -44,15 +54,12 @@ def generate_shorts(
           "shorts": [...],           # rendered clips with clip_url / thumbnail
         }
     """
-    # Per-video output subfolder
-    _m = re.search(r"(?:v=|youtu\.be/|/shorts/)([A-Za-z0-9_-]{11})", youtube_url)
-    vid_id = _m.group(1) if _m else "unknown"
     from .config import LOCAL_OUTPUT_DIR
     base_dir = output_dir or LOCAL_OUTPUT_DIR
-    video_out_dir = os.path.join(base_dir, vid_id)
 
-    # 1. Download
-    source_path = download_youtube_local(youtube_url, fmt=download_format)
+    # 1. Download (skipped for local files)
+    source_path, folder = _resolve_source(youtube_url, download_format)
+    video_out_dir = os.path.join(base_dir, folder)
 
     # 2. Transcribe
     transcript = transcribe_local(source_path, language=language)

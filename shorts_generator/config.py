@@ -12,6 +12,10 @@ LOCAL_WHISPER_DEVICE = os.getenv("LOCAL_WHISPER_DEVICE", "auto")  # auto, cpu, o
 
 LOCAL_OUTPUT_DIR = os.getenv("LOCAL_OUTPUT_DIR", "output")
 
+# JavaScript runtimes yt-dlp may use to get past YouTube's download protection.
+# At least one must be installed (deno, node, bun or quickjs); without it YouTube answers 403.
+YTDLP_JS_RUNTIMES = [r.strip().lower() for r in os.getenv("YTDLP_JS_RUNTIMES", "deno,node").split(",") if r.strip()]
+
 
 def require_openai_key() -> str:
     if not OPENAI_API_KEY:

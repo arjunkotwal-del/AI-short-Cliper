@@ -1,15 +1,16 @@
 """Local clipping: ffmpeg subclip + dynamic speaker crop + ASS captions.
 
 Pipeline per highlight:
-  1. Cut [start, end] with ffmpeg.
+  1. Cut [start, end] with ffmpeg, and strip black bars baked into the source.
   2. Sample 1 frame/sec, detect faces with MediaPipe, cluster speakers.
-  3a. 0 faces → letterbox fallback.
+  3a. Faces in under a quarter of the frames → full frame over a blurred background.
   3b. 1 speaker → smooth dynamic crop that pans to follow them.
   3c. 2+ speakers → vertical split-screen, each panel tracks its speaker.
   4. Generate ASS subtitle file with word-level karaoke highlighting.
   5. Burn subtitles into the reframed video with ffmpeg.
 """
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -55,11 +56,13 @@ def _ratio(aspect_ratio: str) -> float:
 # ---------------------------------------------------------------------------
 
 def _cut_subclip(source_path: str, start: float, end: float, out_path: str) -> str:
+    # -ss before -i jumps straight to the nearest keyframe instead of decoding the source
+    # from the beginning (minutes saved on long videos); re-encoding keeps the cut exact.
     cmd = [
         FFMPEG, "-y", "-loglevel", "error",
-        "-i", source_path,
         "-ss", f"{start:.3f}",
-        "-to", f"{end:.3f}",
+        "-i", source_path,
+        "-t", f"{max(end - start, 0.1):.3f}",
         "-c:v", "libx264", "-preset", "fast", "-crf", "20",
         "-c:a", "aac", "-b:a", "128k",
         out_path,
@@ -364,14 +367,99 @@ OUT_H = 1280
 
 
 def _reframe_vertical(in_path: str, out_path: str, aspect_ratio: str) -> str:
-    """Letterbox the full horizontal frame into a 9:16 container with black bars top/bottom."""
-    print("[clip/framing] letterbox — full horizontal frame, black bars top/bottom", flush=True)
-    vf = f"scale={OUT_W}:-2,pad={OUT_W}:{OUT_H}:0:(oh-ih)/2:black"
+    """Fit the full frame into 9:16 over a blurred, darkened copy of itself instead of black bars."""
+    print("[clip/framing] fit — full frame over a blurred background", flush=True)
+    # Blurring a quarter-size copy and scaling it back up is much faster than a large blur radius.
+    small_w, small_h = OUT_W // 4, OUT_H // 4
+    filter_complex = (
+        "[0:v]split=2[bg][fg];"
+        f"[bg]scale={small_w}:{small_h}:force_original_aspect_ratio=increase,crop={small_w}:{small_h},"
+        f"boxblur=6:2,scale={OUT_W}:{OUT_H},eq=brightness=-0.12[blur];"
+        f"[fg]scale={OUT_W}:{OUT_H}:force_original_aspect_ratio=decrease:force_divisible_by=2[fit];"
+        "[blur][fit]overlay=(W-w)/2:(H-h)/2,format=yuv420p[v]"
+    )
     cmd = [
         FFMPEG, "-y", "-loglevel", "error",
         "-i", in_path,
-        "-vf", vf,
+        "-filter_complex", filter_complex,
+        "-map", "[v]", "-map", "0:a?",
         "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+        "-c:a", "copy",
+        out_path,
+    ]
+    subprocess.run(cmd, check=True, timeout=_FFMPEG_TIMEOUT)
+    return out_path
+
+
+# ---------------------------------------------------------------------------
+# Black bars baked into the source (e.g. a widescreen film inside a 16:9 upload)
+# ---------------------------------------------------------------------------
+
+_CROPDETECT_RE = re.compile(r"crop=(\d+):(\d+):(\d+):(\d+)")
+_BAR_SAMPLES = 5
+_MIN_BAR_FRACTION = 0.03     # each bar must cover at least 3% of the height
+_MAX_BAR_ASYMMETRY = 0.02    # top and bottom bars may differ by 2% of the height
+_MIN_KEPT_FRACTION = 0.5     # never crop away more than half the picture
+
+
+def _choose_bar_crop(
+    boxes: List[Tuple[int, int, int, int]], src_w: int, src_h: int
+) -> Optional[Tuple[int, int, int, int]]:
+    """Turn per-sample cropdetect boxes (w, h, x, y) into one safe crop, or None.
+
+    Dark scenes make cropdetect cut into the picture, so the kept area is the union
+    of every sample's box, and only symmetric top/bottom bars of a real size count.
+    """
+    if len(boxes) < 3:
+        return None
+    top = min(y for _, _, _, y in boxes)
+    bottom = max(y + h for _, h, _, y in boxes)
+    bar_top, bar_bottom = top, src_h - bottom
+    kept = bottom - top
+    if min(bar_top, bar_bottom) < src_h * _MIN_BAR_FRACTION:
+        return None
+    if abs(bar_top - bar_bottom) > src_h * _MAX_BAR_ASYMMETRY:
+        return None
+    if kept < src_h * _MIN_KEPT_FRACTION:
+        return None
+    kept -= kept % 2
+    return src_w, kept, 0, top - (top % 2)
+
+
+def _detect_baked_bars(in_path: str) -> Optional[Tuple[int, int, int, int]]:
+    """Sample the clip with ffmpeg cropdetect and return a crop box for its black bars, if any."""
+    src_w, src_h, _ = _probe_video(in_path)
+    duration = _get_video_duration(in_path)
+    boxes: List[Tuple[int, int, int, int]] = []
+    for i in range(_BAR_SAMPLES):
+        at = duration * (i + 0.5) / _BAR_SAMPLES
+        probe = subprocess.run(
+            [
+                FFMPEG, "-hide_banner", "-ss", f"{at:.2f}", "-i", in_path,
+                "-frames:v", "10", "-vf", "cropdetect=limit=24:round=2:reset=0",
+                "-f", "null", "-",
+            ],
+            capture_output=True, text=True, timeout=_FFMPEG_TIMEOUT,
+        )
+        found = _CROPDETECT_RE.findall(probe.stderr)
+        if found:
+            w, h, x, y = (int(v) for v in found[-1])
+            boxes.append((w, h, x, y))
+    return _choose_bar_crop(boxes, src_w, src_h)
+
+
+def _strip_baked_bars(in_path: str, out_path: str) -> str:
+    """Crop away black bars that are part of the source picture. Returns the path to use next."""
+    box = _detect_baked_bars(in_path)
+    if box is None:
+        return in_path
+    w, h, x, y = box
+    print(f"[clip/framing] removing baked-in black bars -> {w}x{h}", flush=True)
+    cmd = [
+        FFMPEG, "-y", "-loglevel", "error",
+        "-i", in_path,
+        "-vf", f"crop={w}:{h}:{x}:{y}",
+        "-c:v", "libx264", "-preset", "fast", "-crf", "18",
         "-c:a", "copy",
         out_path,
     ]
@@ -602,10 +690,15 @@ def _hybrid_reframe(
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
+# Share of sampled seconds that must show a face before the clip is cropped to follow it.
+# Below this (animations, slides, b-roll) a tight crop mostly cuts off on-screen text.
+_MIN_FACE_COVERAGE = 0.25
+
+
 def _smart_reframe(in_path: str, out_path: str, aspect_ratio: str) -> str:
     """Detect faces and choose the best framing strategy automatically.
 
-    - 0 faces → letterbox fallback
+    - faces in under 25% of frames → full frame over a blurred background
     - 1 speaker → instant-snap dynamic crop following them
     - 2+ speakers → hybrid: switches between single-crop and split-screen
       within the clip based on how many faces are visible each second
@@ -616,7 +709,7 @@ def _smart_reframe(in_path: str, out_path: str, aspect_ratio: str) -> str:
     # Sample 1 frame per second
     frames = _sample_frames_1fps(in_path)
     if not frames:
-        print("[clip/framing] no frames sampled — letterbox fallback", flush=True)
+        print("[clip/framing] no frames sampled — fit fallback", flush=True)
         return _reframe_vertical(in_path, out_path, aspect_ratio)
 
     # Detect faces in every frame
@@ -624,11 +717,9 @@ def _smart_reframe(in_path: str, out_path: str, aspect_ratio: str) -> str:
     total_faces = sum(len(d) for d in per_frame_dets)
     frames_with_faces = sum(1 for d in per_frame_dets if d)
 
-    if total_faces == 0:
-        print("[clip/framing] no faces detected — letterbox fallback", flush=True)
-        return _reframe_vertical(in_path, out_path, aspect_ratio)
-
     print(f"[clip/framing] {total_faces} face detections in {frames_with_faces}/{len(frames)} frames", flush=True)
+    if frames_with_faces < len(frames) * _MIN_FACE_COVERAGE:
+        return _reframe_vertical(in_path, out_path, aspect_ratio)
 
     # Cluster into speaker positions
     speakers = _cluster_speakers(per_frame_dets, src_w)
@@ -653,6 +744,34 @@ def _smart_reframe(in_path: str, out_path: str, aspect_ratio: str) -> str:
 # ---------------------------------------------------------------------------
 
 _WORDS_PER_CHUNK = 3  # words shown at once
+_CHUNK_BREAK_PAUSE = 0.6  # a silence this long (seconds) starts a new caption chunk
+# Shorts/TikTok/Reels draw the caption, username and buttons over roughly the bottom
+# fifth of the video, so captions sit above that instead of at the very bottom.
+_CAPTION_BOTTOM_MARGIN = 0.27
+_HOOK_SECONDS = 2.5
+
+
+def _chunk_words(words: List[Dict]) -> List[List[Dict]]:
+    """Group words into caption chunks of up to 3, never spanning a sentence end or a pause."""
+    chunks: List[List[Dict]] = []
+    current: List[Dict] = []
+    for i, w in enumerate(words):
+        current.append(w)
+        nxt = words[i + 1] if i + 1 < len(words) else None
+        sentence_end = w["word"].rstrip()[-1:] in ".?!"
+        pause = nxt is not None and nxt["start"] - w["end"] >= _CHUNK_BREAK_PAUSE
+        if nxt is None or sentence_end or pause or len(current) >= _WORDS_PER_CHUNK:
+            chunks.append(current)
+            current = []
+    return chunks
+
+
+def _hook_font_size(text: str, width: int, height: int) -> int:
+    """Largest size (capped) at which the hook fits in about three lines of Impact."""
+    base = max(72, int(height * 0.065))
+    usable = max(width - 40, 1)
+    fits_three_lines = int(3 * usable / (0.55 * max(len(text), 1)))
+    return max(44, min(base, fits_three_lines))
 
 
 def _fmt_ass_time(seconds: float) -> str:
@@ -679,14 +798,14 @@ def _generate_ass(
     clip_end: float,
     width: int,
     height: int,
-    hook_sentence: Optional[str] = None,
+    hook_text: Optional[str] = None,
 ) -> Optional[str]:
     """Build an ASS subtitle file with karaoke-style word highlighting.
 
     Primary colour (yellow) = active/just-spoken word.
     Secondary colour (white) = upcoming words in the same chunk.
     Each chunk pops in with a quick scale animation.
-    If hook_sentence is provided, it is burned as large top text for the first 2.5 s.
+    If hook_text is provided, it is burned as large top text for the first 2.5 s.
     """
     clip_words = []
     for w in words:
@@ -702,12 +821,12 @@ def _generate_ass(
                 "end": min(clip_end - clip_start, we - clip_start),
             })
 
-    if not clip_words and not hook_sentence:
+    if not clip_words and not hook_text:
         return None
 
     font_size = max(60, int(height * 0.055))
-    hook_size = max(72, int(height * 0.065))
-    margin_v = max(60, int(height * 0.06))
+    hook_size = _hook_font_size(hook_text or "", width, height)
+    margin_v = max(60, int(height * _CAPTION_BOTTOM_MARGIN))
     margin_top = max(120, int(height * 0.15))
 
     header = f"""[Script Info]
@@ -727,17 +846,16 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
     events = []
 
-    # Hook overlay: top-center for first 2.5 seconds
-    if hook_sentence:
-        safe_hook = _escape_ass(hook_sentence.upper())
+    # Hook overlay: top-center for the first few seconds
+    if hook_text:
+        safe_hook = _escape_ass(hook_text.upper())
         events.append(
-            f"Dialogue: 1,{_fmt_ass_time(0)},{_fmt_ass_time(2.5)},"
+            f"Dialogue: 1,{_fmt_ass_time(0)},{_fmt_ass_time(_HOOK_SECONDS)},"
             f"Hook,,0,0,0,,{{\\an8\\fscx90\\fscy90\\t(0,200,\\fscx100\\fscy100)}}{safe_hook}"
         )
 
     # Karaoke word chunks
-    chunks = [clip_words[i:i + _WORDS_PER_CHUNK] for i in range(0, len(clip_words), _WORDS_PER_CHUNK)]
-    for chunk in chunks:
+    for chunk in _chunk_words(clip_words):
         chunk_start = chunk[0]["start"]
         chunk_end = chunk[-1]["end"]
         if chunk_end <= chunk_start:
@@ -997,10 +1115,16 @@ def crop_clip_local(
     remove_silence: bool = False,
     letterbox: bool = False,
     voiceover: bool = False,
+    hook_text: Optional[str] = None,
 ) -> str:
-    """Cut + smart reframe (or letterbox) + captions + TTS hook voiceover."""
+    """Cut + smart reframe (or fit) + captions + TTS hook voiceover.
+
+    hook_text is the short line shown on screen for the first seconds (falls back to
+    hook_sentence); hook_sentence is what the optional TTS voiceover reads out.
+    """
     check_cancelled()
     cut_path = out_path + ".cut.mp4"
+    debarred_path = out_path + ".debarred.mp4"
     dejumped_path = out_path + ".dejumped.mp4"
     framed_path = out_path + ".framed.mp4"
     hooked_path = out_path + ".hooked.mp4"
@@ -1011,10 +1135,15 @@ def crop_clip_local(
 
     try:
         _cut_subclip(source_path, start_time, end_time, cut_path)
+        try:
+            cut_ready = _strip_baked_bars(cut_path, debarred_path)
+        except (subprocess.SubprocessError, OSError, ValueError) as e:
+            print(f"[clip/framing] black-bar check failed ({e}), keeping the full frame", flush=True)
+            cut_ready = cut_path
         if remove_silence:
-            _remove_silence(cut_path, dejumped_path)
+            _remove_silence(cut_ready, dejumped_path)
         else:
-            shutil.copy2(cut_path, dejumped_path)
+            shutil.copy2(cut_ready, dejumped_path)
         if letterbox:
             _reframe_vertical(dejumped_path, framed_path, aspect_ratio)
         else:
@@ -1023,7 +1152,8 @@ def crop_clip_local(
         # Burn captions
         captioned = False
         captioned_path = framed_path
-        if words or hook_sentence:
+        on_screen_hook = hook_text or hook_sentence
+        if words or on_screen_hook:
             try:
                 probe = subprocess.run(
                     [
@@ -1040,7 +1170,7 @@ def crop_clip_local(
 
                 ass_content = _generate_ass(
                     words or [], start_time, end_time, w, h,
-                    hook_sentence=hook_sentence,
+                    hook_text=on_screen_hook,
                 )
                 if ass_content:
                     with open(ass_path, "w", encoding="utf-8") as f:
@@ -1079,7 +1209,7 @@ def crop_clip_local(
                 pass
 
     finally:
-        for p in [cut_path, dejumped_path, framed_path, ass_path, hook_mp3]:
+        for p in [cut_path, debarred_path, dejumped_path, framed_path, ass_path, hook_mp3]:
             if p and os.path.exists(p) and p != out_path:
                 try:
                     os.remove(p)
@@ -1136,6 +1266,9 @@ def crop_highlights_local(
                 remove_silence=remove_silence,
                 letterbox=letterbox,
                 voiceover=voiceover,
+                # The short punchy title reads in the 2.5 s the hook is on screen;
+                # the longer context sentence is kept for the voiceover.
+                hook_text=h.get("title"),
             )
             thumb_path = os.path.splitext(out_path)[0] + ".jpg"
             _extract_thumbnail(out_path, thumb_path)
