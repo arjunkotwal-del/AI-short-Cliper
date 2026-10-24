@@ -210,7 +210,7 @@ def assemble_gaming_clip(
 
                 ass_content = _generate_ass(
                     words, clip["start_time"], clip["end_time"], fw, fh,
-                    hook_sentence=None,
+                    hook_text=None,
                 )
                 if ass_content:
                     out_dir = os.path.dirname(os.path.abspath(out_path)) or "."

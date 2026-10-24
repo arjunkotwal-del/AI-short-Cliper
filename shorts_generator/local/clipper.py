@@ -744,6 +744,34 @@ def _smart_reframe(in_path: str, out_path: str, aspect_ratio: str) -> str:
 # ---------------------------------------------------------------------------
 
 _WORDS_PER_CHUNK = 3  # words shown at once
+_CHUNK_BREAK_PAUSE = 0.6  # a silence this long (seconds) starts a new caption chunk
+# Shorts/TikTok/Reels draw the caption, username and buttons over roughly the bottom
+# fifth of the video, so captions sit above that instead of at the very bottom.
+_CAPTION_BOTTOM_MARGIN = 0.27
+_HOOK_SECONDS = 2.5
+
+
+def _chunk_words(words: List[Dict]) -> List[List[Dict]]:
+    """Group words into caption chunks of up to 3, never spanning a sentence end or a pause."""
+    chunks: List[List[Dict]] = []
+    current: List[Dict] = []
+    for i, w in enumerate(words):
+        current.append(w)
+        nxt = words[i + 1] if i + 1 < len(words) else None
+        sentence_end = w["word"].rstrip()[-1:] in ".?!"
+        pause = nxt is not None and nxt["start"] - w["end"] >= _CHUNK_BREAK_PAUSE
+        if nxt is None or sentence_end or pause or len(current) >= _WORDS_PER_CHUNK:
+            chunks.append(current)
+            current = []
+    return chunks
+
+
+def _hook_font_size(text: str, width: int, height: int) -> int:
+    """Largest size (capped) at which the hook fits in about three lines of Impact."""
+    base = max(72, int(height * 0.065))
+    usable = max(width - 40, 1)
+    fits_three_lines = int(3 * usable / (0.55 * max(len(text), 1)))
+    return max(44, min(base, fits_three_lines))
 
 
 def _fmt_ass_time(seconds: float) -> str:
@@ -770,14 +798,14 @@ def _generate_ass(
     clip_end: float,
     width: int,
     height: int,
-    hook_sentence: Optional[str] = None,
+    hook_text: Optional[str] = None,
 ) -> Optional[str]:
     """Build an ASS subtitle file with karaoke-style word highlighting.
 
     Primary colour (yellow) = active/just-spoken word.
     Secondary colour (white) = upcoming words in the same chunk.
     Each chunk pops in with a quick scale animation.
-    If hook_sentence is provided, it is burned as large top text for the first 2.5 s.
+    If hook_text is provided, it is burned as large top text for the first 2.5 s.
     """
     clip_words = []
     for w in words:
@@ -793,12 +821,12 @@ def _generate_ass(
                 "end": min(clip_end - clip_start, we - clip_start),
             })
 
-    if not clip_words and not hook_sentence:
+    if not clip_words and not hook_text:
         return None
 
     font_size = max(60, int(height * 0.055))
-    hook_size = max(72, int(height * 0.065))
-    margin_v = max(60, int(height * 0.06))
+    hook_size = _hook_font_size(hook_text or "", width, height)
+    margin_v = max(60, int(height * _CAPTION_BOTTOM_MARGIN))
     margin_top = max(120, int(height * 0.15))
 
     header = f"""[Script Info]
@@ -818,17 +846,16 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
     events = []
 
-    # Hook overlay: top-center for first 2.5 seconds
-    if hook_sentence:
-        safe_hook = _escape_ass(hook_sentence.upper())
+    # Hook overlay: top-center for the first few seconds
+    if hook_text:
+        safe_hook = _escape_ass(hook_text.upper())
         events.append(
-            f"Dialogue: 1,{_fmt_ass_time(0)},{_fmt_ass_time(2.5)},"
+            f"Dialogue: 1,{_fmt_ass_time(0)},{_fmt_ass_time(_HOOK_SECONDS)},"
             f"Hook,,0,0,0,,{{\\an8\\fscx90\\fscy90\\t(0,200,\\fscx100\\fscy100)}}{safe_hook}"
         )
 
     # Karaoke word chunks
-    chunks = [clip_words[i:i + _WORDS_PER_CHUNK] for i in range(0, len(clip_words), _WORDS_PER_CHUNK)]
-    for chunk in chunks:
+    for chunk in _chunk_words(clip_words):
         chunk_start = chunk[0]["start"]
         chunk_end = chunk[-1]["end"]
         if chunk_end <= chunk_start:
@@ -1088,8 +1115,13 @@ def crop_clip_local(
     remove_silence: bool = False,
     letterbox: bool = False,
     voiceover: bool = False,
+    hook_text: Optional[str] = None,
 ) -> str:
-    """Cut + smart reframe (or letterbox) + captions + TTS hook voiceover."""
+    """Cut + smart reframe (or fit) + captions + TTS hook voiceover.
+
+    hook_text is the short line shown on screen for the first seconds (falls back to
+    hook_sentence); hook_sentence is what the optional TTS voiceover reads out.
+    """
     check_cancelled()
     cut_path = out_path + ".cut.mp4"
     debarred_path = out_path + ".debarred.mp4"
@@ -1120,7 +1152,8 @@ def crop_clip_local(
         # Burn captions
         captioned = False
         captioned_path = framed_path
-        if words or hook_sentence:
+        on_screen_hook = hook_text or hook_sentence
+        if words or on_screen_hook:
             try:
                 probe = subprocess.run(
                     [
@@ -1137,7 +1170,7 @@ def crop_clip_local(
 
                 ass_content = _generate_ass(
                     words or [], start_time, end_time, w, h,
-                    hook_sentence=hook_sentence,
+                    hook_text=on_screen_hook,
                 )
                 if ass_content:
                     with open(ass_path, "w", encoding="utf-8") as f:
@@ -1233,6 +1266,9 @@ def crop_highlights_local(
                 remove_silence=remove_silence,
                 letterbox=letterbox,
                 voiceover=voiceover,
+                # The short punchy title reads in the 2.5 s the hook is on screen;
+                # the longer context sentence is kept for the voiceover.
+                hook_text=h.get("title"),
             )
             thumb_path = os.path.splitext(out_path)[0] + ".jpg"
             _extract_thumbnail(out_path, thumb_path)
