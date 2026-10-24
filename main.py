@@ -2,6 +2,7 @@
 
 Usage:
     python main.py "https://www.youtube.com/watch?v=..." --num-clips 5 --min-score 80
+    python main.py "C:/videos/podcast.mp4" --num-clips 3
     python main.py "https://..." --mode gaming --num-clips 3
 """
 import argparse
@@ -20,7 +21,7 @@ from shorts_generator import generate_shorts, generate_gaming_shorts
 def main() -> int:
     parser = argparse.ArgumentParser(description="AI YouTube Shorts Generator")
     parser.add_argument("url",
-                        help="YouTube video URL")
+                        help="YouTube video URL, or a local video file (default mode only)")
     parser.add_argument("--mode", default="default",
                         choices=["default", "gaming"],
                         help="Pipeline mode (default: default)")
