@@ -150,7 +150,7 @@ Uses an Orchestrator Agent to interpret natural language requests and dynamicall
 | Tool | Install |
 |------|---------|
 | Python 3.10–3.12 (tested on 3.11) | [python.org](https://www.python.org/). mediapipe and faster-whisper may not ship wheels for newer versions yet. |
-| ffmpeg | `winget install ffmpeg` / `brew install ffmpeg` / `apt install ffmpeg` |
+| ffmpeg 4.3+ | `winget install ffmpeg` / `brew install ffmpeg` / `apt install ffmpeg` |
 | Node.js or Deno | YouTube downloads need a JavaScript runtime for yt-dlp; without one YouTube answers HTTP 403 |
 | Git | for cloning |
 
@@ -239,7 +239,7 @@ python main.py URL [options]
 | `--format 360/480/720/1080` | `720` | Source download resolution |
 | `--aspect-ratio W:H` | `9:16` | Output aspect ratio |
 | `--language CODE` | auto | Force Whisper language (e.g. `en`, `es`) |
-| `--letterbox` | off | Static scale-to-fit instead of smart speaker crop |
+| `--letterbox` | off | Always fit the full frame over a blurred background instead of smart speaker crop |
 | `--remove-silence` | off | Strip silent gaps from clips |
 | `--output-dir PATH` | from `.env` | Override output folder |
 | `--output-json PATH` | — | Dump full result metadata to JSON |

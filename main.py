@@ -41,7 +41,7 @@ def main() -> int:
     parser.add_argument("--output-dir", default=None,
                         help="Override output directory (default: from .env or ./output)")
     parser.add_argument("--letterbox", action="store_true",
-                        help="Disable smart speaker framing, use letterbox instead")
+                        help="Disable smart speaker framing; always fit the full frame over a blurred background")
     parser.add_argument("--remove-silence", action="store_true",
                         help="Remove silent gaps from clips (off by default)")
     parser.add_argument("--clip-duration", type=float, default=22.0,
