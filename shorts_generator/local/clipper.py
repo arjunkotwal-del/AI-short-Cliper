@@ -1,7 +1,7 @@
 """Local clipping: ffmpeg subclip + dynamic speaker crop + ASS captions.
 
 Pipeline per highlight:
-  1. Cut [start, end] with ffmpeg.
+  1. Cut [start, end] with ffmpeg, and strip black bars baked into the source.
   2. Sample 1 frame/sec, detect faces with MediaPipe, cluster speakers.
   3a. Faces in under a quarter of the frames → full frame over a blurred background.
   3b. 1 speaker → smooth dynamic crop that pans to follow them.
@@ -10,6 +10,7 @@ Pipeline per highlight:
   5. Burn subtitles into the reframed video with ffmpeg.
 """
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -383,6 +384,82 @@ def _reframe_vertical(in_path: str, out_path: str, aspect_ratio: str) -> str:
         "-filter_complex", filter_complex,
         "-map", "[v]", "-map", "0:a?",
         "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+        "-c:a", "copy",
+        out_path,
+    ]
+    subprocess.run(cmd, check=True, timeout=_FFMPEG_TIMEOUT)
+    return out_path
+
+
+# ---------------------------------------------------------------------------
+# Black bars baked into the source (e.g. a widescreen film inside a 16:9 upload)
+# ---------------------------------------------------------------------------
+
+_CROPDETECT_RE = re.compile(r"crop=(\d+):(\d+):(\d+):(\d+)")
+_BAR_SAMPLES = 5
+_MIN_BAR_FRACTION = 0.03     # each bar must cover at least 3% of the height
+_MAX_BAR_ASYMMETRY = 0.02    # top and bottom bars may differ by 2% of the height
+_MIN_KEPT_FRACTION = 0.5     # never crop away more than half the picture
+
+
+def _choose_bar_crop(
+    boxes: List[Tuple[int, int, int, int]], src_w: int, src_h: int
+) -> Optional[Tuple[int, int, int, int]]:
+    """Turn per-sample cropdetect boxes (w, h, x, y) into one safe crop, or None.
+
+    Dark scenes make cropdetect cut into the picture, so the kept area is the union
+    of every sample's box, and only symmetric top/bottom bars of a real size count.
+    """
+    if len(boxes) < 3:
+        return None
+    top = min(y for _, _, _, y in boxes)
+    bottom = max(y + h for _, h, _, y in boxes)
+    bar_top, bar_bottom = top, src_h - bottom
+    kept = bottom - top
+    if min(bar_top, bar_bottom) < src_h * _MIN_BAR_FRACTION:
+        return None
+    if abs(bar_top - bar_bottom) > src_h * _MAX_BAR_ASYMMETRY:
+        return None
+    if kept < src_h * _MIN_KEPT_FRACTION:
+        return None
+    kept -= kept % 2
+    return src_w, kept, 0, top - (top % 2)
+
+
+def _detect_baked_bars(in_path: str) -> Optional[Tuple[int, int, int, int]]:
+    """Sample the clip with ffmpeg cropdetect and return a crop box for its black bars, if any."""
+    src_w, src_h, _ = _probe_video(in_path)
+    duration = _get_video_duration(in_path)
+    boxes: List[Tuple[int, int, int, int]] = []
+    for i in range(_BAR_SAMPLES):
+        at = duration * (i + 0.5) / _BAR_SAMPLES
+        probe = subprocess.run(
+            [
+                FFMPEG, "-hide_banner", "-ss", f"{at:.2f}", "-i", in_path,
+                "-frames:v", "10", "-vf", "cropdetect=limit=24:round=2:reset=0",
+                "-f", "null", "-",
+            ],
+            capture_output=True, text=True, timeout=_FFMPEG_TIMEOUT,
+        )
+        found = _CROPDETECT_RE.findall(probe.stderr)
+        if found:
+            w, h, x, y = (int(v) for v in found[-1])
+            boxes.append((w, h, x, y))
+    return _choose_bar_crop(boxes, src_w, src_h)
+
+
+def _strip_baked_bars(in_path: str, out_path: str) -> str:
+    """Crop away black bars that are part of the source picture. Returns the path to use next."""
+    box = _detect_baked_bars(in_path)
+    if box is None:
+        return in_path
+    w, h, x, y = box
+    print(f"[clip/framing] removing baked-in black bars -> {w}x{h}", flush=True)
+    cmd = [
+        FFMPEG, "-y", "-loglevel", "error",
+        "-i", in_path,
+        "-vf", f"crop={w}:{h}:{x}:{y}",
+        "-c:v", "libx264", "-preset", "fast", "-crf", "18",
         "-c:a", "copy",
         out_path,
     ]
@@ -1015,6 +1092,7 @@ def crop_clip_local(
     """Cut + smart reframe (or letterbox) + captions + TTS hook voiceover."""
     check_cancelled()
     cut_path = out_path + ".cut.mp4"
+    debarred_path = out_path + ".debarred.mp4"
     dejumped_path = out_path + ".dejumped.mp4"
     framed_path = out_path + ".framed.mp4"
     hooked_path = out_path + ".hooked.mp4"
@@ -1025,10 +1103,15 @@ def crop_clip_local(
 
     try:
         _cut_subclip(source_path, start_time, end_time, cut_path)
+        try:
+            cut_ready = _strip_baked_bars(cut_path, debarred_path)
+        except (subprocess.SubprocessError, OSError, ValueError) as e:
+            print(f"[clip/framing] black-bar check failed ({e}), keeping the full frame", flush=True)
+            cut_ready = cut_path
         if remove_silence:
-            _remove_silence(cut_path, dejumped_path)
+            _remove_silence(cut_ready, dejumped_path)
         else:
-            shutil.copy2(cut_path, dejumped_path)
+            shutil.copy2(cut_ready, dejumped_path)
         if letterbox:
             _reframe_vertical(dejumped_path, framed_path, aspect_ratio)
         else:
@@ -1093,7 +1176,7 @@ def crop_clip_local(
                 pass
 
     finally:
-        for p in [cut_path, dejumped_path, framed_path, ass_path, hook_mp3]:
+        for p in [cut_path, debarred_path, dejumped_path, framed_path, ass_path, hook_mp3]:
             if p and os.path.exists(p) and p != out_path:
                 try:
                     os.remove(p)
