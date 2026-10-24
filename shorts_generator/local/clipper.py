@@ -3,7 +3,7 @@
 Pipeline per highlight:
   1. Cut [start, end] with ffmpeg.
   2. Sample 1 frame/sec, detect faces with MediaPipe, cluster speakers.
-  3a. 0 faces → letterbox fallback.
+  3a. Faces in under a quarter of the frames → full frame over a blurred background.
   3b. 1 speaker → smooth dynamic crop that pans to follow them.
   3c. 2+ speakers → vertical split-screen, each panel tracks its speaker.
   4. Generate ASS subtitle file with word-level karaoke highlighting.
@@ -366,13 +366,22 @@ OUT_H = 1280
 
 
 def _reframe_vertical(in_path: str, out_path: str, aspect_ratio: str) -> str:
-    """Letterbox the full horizontal frame into a 9:16 container with black bars top/bottom."""
-    print("[clip/framing] letterbox — full horizontal frame, black bars top/bottom", flush=True)
-    vf = f"scale={OUT_W}:-2,pad={OUT_W}:{OUT_H}:0:(oh-ih)/2:black"
+    """Fit the full frame into 9:16 over a blurred, darkened copy of itself instead of black bars."""
+    print("[clip/framing] fit — full frame over a blurred background", flush=True)
+    # Blurring a quarter-size copy and scaling it back up is much faster than a large blur radius.
+    small_w, small_h = OUT_W // 4, OUT_H // 4
+    filter_complex = (
+        "[0:v]split=2[bg][fg];"
+        f"[bg]scale={small_w}:{small_h}:force_original_aspect_ratio=increase,crop={small_w}:{small_h},"
+        f"boxblur=6:2,scale={OUT_W}:{OUT_H},eq=brightness=-0.12[blur];"
+        f"[fg]scale={OUT_W}:{OUT_H}:force_original_aspect_ratio=decrease:force_divisible_by=2[fit];"
+        "[blur][fit]overlay=(W-w)/2:(H-h)/2,format=yuv420p[v]"
+    )
     cmd = [
         FFMPEG, "-y", "-loglevel", "error",
         "-i", in_path,
-        "-vf", vf,
+        "-filter_complex", filter_complex,
+        "-map", "[v]", "-map", "0:a?",
         "-c:v", "libx264", "-preset", "fast", "-crf", "20",
         "-c:a", "copy",
         out_path,
@@ -604,10 +613,15 @@ def _hybrid_reframe(
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
+# Share of sampled seconds that must show a face before the clip is cropped to follow it.
+# Below this (animations, slides, b-roll) a tight crop mostly cuts off on-screen text.
+_MIN_FACE_COVERAGE = 0.25
+
+
 def _smart_reframe(in_path: str, out_path: str, aspect_ratio: str) -> str:
     """Detect faces and choose the best framing strategy automatically.
 
-    - 0 faces → letterbox fallback
+    - faces in under 25% of frames → full frame over a blurred background
     - 1 speaker → instant-snap dynamic crop following them
     - 2+ speakers → hybrid: switches between single-crop and split-screen
       within the clip based on how many faces are visible each second
@@ -618,7 +632,7 @@ def _smart_reframe(in_path: str, out_path: str, aspect_ratio: str) -> str:
     # Sample 1 frame per second
     frames = _sample_frames_1fps(in_path)
     if not frames:
-        print("[clip/framing] no frames sampled — letterbox fallback", flush=True)
+        print("[clip/framing] no frames sampled — fit fallback", flush=True)
         return _reframe_vertical(in_path, out_path, aspect_ratio)
 
     # Detect faces in every frame
@@ -626,11 +640,9 @@ def _smart_reframe(in_path: str, out_path: str, aspect_ratio: str) -> str:
     total_faces = sum(len(d) for d in per_frame_dets)
     frames_with_faces = sum(1 for d in per_frame_dets if d)
 
-    if total_faces == 0:
-        print("[clip/framing] no faces detected — letterbox fallback", flush=True)
-        return _reframe_vertical(in_path, out_path, aspect_ratio)
-
     print(f"[clip/framing] {total_faces} face detections in {frames_with_faces}/{len(frames)} frames", flush=True)
+    if frames_with_faces < len(frames) * _MIN_FACE_COVERAGE:
+        return _reframe_vertical(in_path, out_path, aspect_ratio)
 
     # Cluster into speaker positions
     speakers = _cluster_speakers(per_frame_dets, src_w)
