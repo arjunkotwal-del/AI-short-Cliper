@@ -55,11 +55,13 @@ def _ratio(aspect_ratio: str) -> float:
 # ---------------------------------------------------------------------------
 
 def _cut_subclip(source_path: str, start: float, end: float, out_path: str) -> str:
+    # -ss before -i jumps straight to the nearest keyframe instead of decoding the source
+    # from the beginning (minutes saved on long videos); re-encoding keeps the cut exact.
     cmd = [
         FFMPEG, "-y", "-loglevel", "error",
-        "-i", source_path,
         "-ss", f"{start:.3f}",
-        "-to", f"{end:.3f}",
+        "-i", source_path,
+        "-t", f"{max(end - start, 0.1):.3f}",
         "-c:v", "libx264", "-preset", "fast", "-crf", "20",
         "-c:a", "aac", "-b:a", "128k",
         out_path,
