@@ -1,6 +1,7 @@
 python-dotenv==1.2.2
 Pillow>=10.0.0
-yt-dlp==2026.3.17
+# YouTube breaks older yt-dlp releases within months; keep this current (pip install -U).
+yt-dlp[default]>=2026.10.21
 faster-whisper==1.2.1
 openai==2.37.0
 opencv-python==4.13.0.92
