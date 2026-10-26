@@ -2,6 +2,8 @@
 
 Automatically turn any YouTube video into viral-ready vertical clips. 100% local, no watermarks, no subscriptions.
 
+![Demo: one long video becomes three vertical shorts, driven from the agentic dashboard](docs/demo.gif)
+
 ---
 
 ## Modes
